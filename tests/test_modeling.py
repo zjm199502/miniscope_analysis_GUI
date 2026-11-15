@@ -324,15 +324,25 @@ def test_embedding_run_and_export(data, tmp_path):
     assert (tmp_path / "cebra" / "run_cebra.py").exists()
 
 
+def test_kinetics_on_generic_workspace(data):
+    from miniscope_gui.core.modeling import kinetics
+    ws, _, _ = data
+    s = kinetics.run_kinetics(None, ws, {"params": kinetics.KineticsParams(n_boot=10, n_null=3)})
+    assert s["n_events"] > 100 and "【细胞层面】" in describe("kinetics", s)
+    # one indicator for every cell here: measured decays sit near the simulated 0.8 s
+    assert 0.5 < s["median"]["decay_tau_s"] < 1.3
+
+
 def test_export_all_and_registry(data, tmp_path):
     ws, cfg, _ = data
     for key in ANALYSES:        # every analysis ran in the tests above
         assert ws.step(f"model_{key}"), key
-        assert 2 <= len(VIEWS[key]) <= 3
+        assert 2 <= len(VIEWS[key]) <= 5
     done = export_all(ws, tmp_path / "out")
     assert set(done) == set(ANALYSES)
     for f in ("glm_encoding.csv", "decoder_timecourse.csv", "ensemble_weights.csv", "embedding.csv",
-              "hmm_states.csv", "network_edges.csv", "information.csv", "modeling_summary.txt"):
+              "hmm_states.csv", "network_edges.csv", "information.csv", "kinetics_events.csv",
+              "kinetics_cells.csv", "modeling_summary.txt"):
         assert (tmp_path / "out" / f).stat().st_size > 0, f
     head = (tmp_path / "out" / "glm_encoding.csv").read_text(encoding="utf-8-sig").splitlines()[0]
     assert head.startswith("cell_id,cv_r2,p,q_fdr,best_variable")

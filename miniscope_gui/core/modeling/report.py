@@ -37,6 +37,13 @@ ANALYSES = {
              "每个细胞的活动里包含多少关于位置（空间信息，bits/事件）或行为状态（互信息，bits）的信息，"
              "并用打乱时间的方法检验是否显著。\n"
              "读法：p < 0.05 的细胞对该变量有显著选择性；空间信息显著的细胞即位置细胞候选。"),
+    "kinetics": ("钙事件动力学聚类（细胞分型）", False,
+                 "检测每个细胞的每一个钙事件，测量上升时间、衰减时间常数 τ、半高宽、振幅、面积、间隔等动力学参数，"
+                 "再做无监督聚类（高斯混合模型，自动选择类别数），分别在「事件」和「细胞」两个层面看是否分成几类。\n"
+                 "动力学直接从平滑后的 ΔF/F 上测量，不用第 6 步 AR 模型的衰减值。"
+                 "每个结果都附带稳定性检验（重抽样）和与信噪比的混杂检查。\n"
+                 "注意：单光子 GCaMP 的动力学受指示剂表达量、信噪比和背景影响，得到的类别只是「可能的细胞类型」假设，"
+                 "不能直接当作已确认的细胞类型。"),
 }
 
 VIEWS = {
@@ -46,6 +53,9 @@ VIEWS = {
     "embedding": (("emb_state", "嵌入（按行为着色）"), ("emb_time", "嵌入（按时间着色）")),
     "hmm": (("hmm_states", "状态随时间"), ("hmm_trans", "转移矩阵与轨迹"), ("hmm_cells", "各状态的细胞活动")),
     "network": (("net_graph", "网络图"), ("net_matrix", "相关矩阵"), ("net_degree", "度分布")),
+    "kinetics": (("kin_ev_scatter", "事件聚类散点"), ("kin_ev_wave", "各类事件平均波形"),
+                 ("kin_cell_scatter", "细胞聚类散点"), ("kin_map", "细胞图（按类别着色）"),
+                 ("kin_check", "信噪比混杂检查")),
     "info": (("info_si", "空间信息（细胞图）"), ("info_fields", "位置野"), ("info_mi", "互信息（细胞图）")),
 }
 
@@ -128,13 +138,88 @@ def describe(key: str, s: dict) -> str:
             lines.append(f"与「{v['name']}」的互信息：{v['n_sig']} 个细胞显著（FDR 校正后 {v['n_sig_fdr']} 个），"
                          f"中位数 {v['median_mi']:.4f} bits。")
         return "\n".join(lines)
+    if key == "kinetics":
+        return describe_kinetics(s)
     return ""
+
+
+def _verdict(sl):
+    K = sl["K"]
+    if K == 1:
+        return "数据更支持「只有一类」，没有找到分得开的亚群。"
+    ari = sl.get("ari")
+    sil = sl.get("silhouette")
+    jac = [j for j in sl.get("jaccard", []) if j is not None]
+    ari = float("nan") if ari is None else ari
+    sil = float("nan") if sil is None else sil
+    stable = ari >= 0.8 and (min(jac) if jac else 0) >= 0.6
+    tail = f"（重抽样一致性 ARI {ari:.2f}，轮廓系数 {sil:.2f}）"
+    if stable and sil >= 0.25:
+        return f"这 {K} 类可重复，也分得比较开{tail}。"
+    if stable:
+        return f"分类可重复，但各类之间重叠较多{tail}，更像连续变化，而不是截然不同的类型。"
+    return f"分类不稳定{tail}，换一批数据结果就会变，不建议当作不同类型解读。"
+
+
+def describe_kinetics(s: dict) -> str:
+    m = s["median"]
+    f = lambda v, d=2: "—" if v is None else f"{v:.{d}f}"
+    lines = [f"{s['n_cells']} 个细胞共检测到 {s['n_events']} 个钙事件（孤立事件 {s['n_isolated']} 个），"
+             f"{s['n_used_events']} 个用于测量动力学。",
+             f"中位数：上升 {f(m['rise_s'])} 秒，衰减 τ {f(m['decay_tau_s'])} 秒，半衰减 {f(m['t_half_s'])} 秒，"
+             f"半高宽 {f(m['fwhm_s'])} 秒，振幅 {f(m['amp_dff'])} ΔF/F。"]
+    crit = lambda sl: "ICL" if sl.get("criterion", "icl") == "icl" else "BIC"
+    ev = s["event"]
+    if "skipped" in ev:
+        lines.append(f"【事件层面】未聚类：{ev['skipped']}。")
+    else:
+        how = "固定" if ev.get("forced") else f"按 {crit(ev)} 自动选择"
+        lines.append(f"【事件层面】{ev['used']} 个事件分成 {ev['K']} 类（{how}），各类事件数 "
+                     + "、".join(map(str, ev["sizes"])) + "。" + _verdict(ev))
+        if ev["K"] > 1 and ev.get("purity") is not None and ev.get("purity_null") is not None:
+            pn = ev["purity_null"]
+            eff = (ev["purity"] - pn) / (1 - pn) if pn < 1 else 0.0
+            t = (f"同一个细胞的事件有 {100 * ev['purity']:.0f}% 属于它最主要的那一类（随机打乱时 {100 * pn:.0f}%，"
+                 f"p = {ev['purity_p']:.3f}）。")
+            if ev["purity_p"] < 0.05 and eff >= 0.3:
+                t += "事件类型明显随细胞而定，支持「不同细胞有不同的事件类型」。"
+            elif ev["purity_p"] < 0.05:
+                t += "事件类型和细胞只有微弱关联：多数细胞同时有几类事件，事件类别更可能反映事件本身的差异（例如叠加事件、信噪比高低）。"
+            else:
+                t += "事件类型与细胞无关，事件类别不能用来区分细胞。"
+            lines.append(t)
+        icc = ev.get("icc") or {}
+        if icc:
+            names = {"decay_tau_s": "衰减 τ", "rise_s": "上升时间", "fwhm_s": "半高宽", "amp_dff": "振幅",
+                     "area": "面积", "t_half_s": "半衰减时间"}
+            lines.append("参数差异中「细胞之间」所占比例（ICC，越接近 1 越像细胞固有属性）："
+                         + "，".join(f"{names.get(k, k)} {f(v)}" for k, v in icc.items()) + "。")
+        if ev["K"] > 1 and ev.get("p_snr") is not None and ev["p_snr"] < 0.05 and (ev.get("eta2_snr") or 0) >= 0.1:
+            lines.append(f"⚠ 各类事件的信噪比差别较大（解释 {100 * ev['eta2_snr']:.0f}% 的方差），部分类别可能只是信号强弱不同。")
+    c = s["cell"]
+    if "skipped" in c:
+        lines.append(f"【细胞层面】未聚类：{c['skipped']}。")
+    else:
+        how = "固定" if c.get("forced") else f"按 {crit(c)} 自动选择"
+        lines.append(f"【细胞层面】{c['used']} 个细胞分成 {c['K']} 类（{how}），各类细胞数 "
+                     + "、".join(map(str, c["sizes"])) + "。" + _verdict(c))
+        if c["K"] > 1 and c.get("p_snr") is not None and c["p_snr"] < 0.05 and (c.get("eta2_snr") or 0) >= 0.1:
+            lines.append(f"⚠ 各类细胞的信噪比明显不同（解释 {100 * c['eta2_snr']:.0f}% 的方差，p = {c['p_snr']:.3f}），"
+                         "类别可能主要反映表达量或成像质量，而不是细胞类型。")
+        if c["K"] > 1 and c.get("p_area") is not None and c["p_area"] < 0.05 and (c.get("eta2_area") or 0) >= 0.1:
+            lines.append(f"⚠ 各类细胞的面积明显不同（解释 {100 * c['eta2_area']:.0f}% 的方差），也可能与离焦或细胞重叠有关。")
+    r = c.get("r_tau_snr")
+    if r is not None and abs(r) >= 0.3:
+        lines.append(f"⚠ 细胞的衰减 τ 与信噪比相关（r = {r:.2f}），测得的动力学受信号强弱影响，解读时要考虑。")
+    lines.append("提示：单光子 GCaMP 的动力学受表达量、信噪比和背景影响，以上类别只是「可能的细胞类型」假设，"
+                 "需要用形态、标记物或光遗传标记等独立方法验证。")
+    return "\n".join(lines)
 
 
 def export_all(ws: Workspace, folder=None) -> list[str]:
     """Write CSV files for every finished analysis. Returns the analyses exported."""
-    from . import decoder, embedding, ensembles, glm, hmm, info, network
-    fns = {"glm": glm.export_glm, "decoder": decoder.export_decoder, "ensembles": ensembles.export_ensembles,
+    from . import decoder, embedding, ensembles, glm, hmm, info, kinetics, network
+    fns = {"kinetics": kinetics.export_kinetics, "glm": glm.export_glm, "decoder": decoder.export_decoder, "ensembles": ensembles.export_ensembles,
            "embedding": embedding.export_embedding, "hmm": hmm.export_hmm, "network": network.export_network,
            "info": info.export_info}
     out = Path(folder) if folder else ws.path("export") / "modeling"
