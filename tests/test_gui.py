@@ -183,3 +183,50 @@ def test_modeling_page_without_behavior(tmp_path, app, monkeypatch):
     assert w.ws.step("model_embedding")
     mp._show(0); mp._show(1)
     w.close()
+
+
+def test_registration_page(tmp_path, app):
+    import numpy as np
+    from miniscope_gui.gui.main_window import MainWindow
+    from miniscope_gui.gui.registration_views import VIEWS
+    from test_registration import _activity, _world, make_session
+    cells = _world(seed=5, n=60)
+    n = len(cells[0])
+    ws1, _ = make_session(tmp_path / "d1", cells, np.arange(n), seed=1, T=1500, activity=_activity(1, T=1500))
+    ws2, _ = make_session(tmp_path / "d2", cells, np.arange(5, n), angle=2, shift=(2, 3), seed=2, T=1500,
+                          activity=_activity(2, T=1500))
+    make_fake_v4(tmp_path / "My_V4_Miniscope", n_frames=60, frames_per_file=60, size=(64, 64))
+    w = MainWindow()
+    w.show()
+    w.import_page.load_source(str(tmp_path / "My_V4_Miniscope"))
+    w.import_page.set_output(str(ws1.root))
+    assert w.steps.item(9).flags() & Qt.ItemIsEnabled
+    w.steps.setCurrentRow(9)
+    rp = w.reg_page
+    assert rp.sessions() == [("Day1", str(ws1.root))]       # current session is added automatically
+    assert rp.add_session(ws2.root) and not rp.add_session(ws2.root)
+    rp.table.item(1, 0).setText("Day2 测试")
+    rp.out_edit.setText(str(tmp_path / "reg"))
+    rp._run(); _wait(app, w)
+    assert rp.folder and rp.reg_lbl.text() and rp.reg_buttons[0].isEnabled()
+    assert w.ws.step("registration")["outputs"]["folder"] == str(tmp_path / "reg")
+    for key, _ in VIEWS["reg"]:
+        rp._show(key)
+        assert w.view.title.text()
+    for i, kind in enumerate(("react", "stab")):
+        rp.xd_kind.setCurrentIndex(i)
+        rp.xd_shuf.setValue(50)
+        rp._run_xd(); _wait(app, w)
+        assert rp.xd_lbl.text() and rp.xd_buttons[0].isEnabled(), kind
+        for key, _ in VIEWS[kind]:
+            rp._show(key)
+            assert w.view.title.text()
+    # reopening the session finds the earlier registration
+    w2 = MainWindow()
+    w2.import_page.load_source(str(tmp_path / "My_V4_Miniscope"))
+    w2.import_page.set_output(str(ws1.root))
+    assert w2.reg_page.folder == str(tmp_path / "reg") and len(w2.reg_page.sessions()) == 2
+    w2.close()
+    w.steps.setCurrentRow(5)
+    assert not w.view._overlays
+    w.close()
