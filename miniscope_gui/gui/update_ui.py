@@ -166,6 +166,9 @@ class UpdateManager(QObject):
         QApplication.quit()
 
     def _about(self):
+        from .. import patching
+        base = patching.base_version()
+        build = f"（安装包 v{base}，已通过软件内更新升级）" if base and base != __version__ else ""
         QMessageBox.about(self.win, "关于",
-                          f"Miniscope 分析 v{__version__}\n\n"
+                          f"Miniscope 分析 v{__version__}{build}\n\n"
                           f"源代码与更新：https://github.com/{updater.REPO}")
