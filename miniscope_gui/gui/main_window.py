@@ -4,7 +4,8 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QListWidget, QListWidgetItem, QMainWindow,
                                QMessageBox, QProgressBar, QPushButton,
-                               QScrollArea, QSplitter, QStackedWidget)
+                               QScrollArea, QSizePolicy, QSplitter,
+                               QStackedWidget)
 
 from .. import __version__
 from ..core.preprocess import MAX_FILE, MEAN_FILE, load_movie
@@ -38,6 +39,7 @@ class MainWindow(QMainWindow):
 
         self.steps = QListWidget()
         self.steps.setFixedWidth(150)
+        self.steps.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.steps.setStyleSheet("QListWidget{font-size:14px;} QListWidget::item{padding:8px;}")
         for i, (name, _) in enumerate(STEPS):
             it = QListWidgetItem(f"{i + 1}. {name}")
@@ -56,7 +58,11 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(self.pages)
-        scroll.setMinimumWidth(340)
+        scroll.setMinimumWidth(360)
+        # Text in the right panel wraps to the column width; never scroll sideways.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Only the visible page decides the panel's minimum size.
+        self.pages.currentChanged.connect(self._fit_pages)
 
         split = QSplitter()
         split.addWidget(self.steps)
@@ -77,9 +83,16 @@ class MainWindow(QMainWindow):
 
         self.steps.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.steps.setCurrentRow(0)
+        self._fit_pages(0)
         self.import_page.sessionReady.connect(self._on_session)
         self.pre_page.runRequested.connect(self._run_step)
         self.pre_page.showResult.connect(self._show_pre_result)
+
+    def _fit_pages(self, current):
+        for i in range(self.pages.count()):
+            pol = QSizePolicy.Preferred if i == current else QSizePolicy.Ignored
+            self.pages.widget(i).setSizePolicy(pol, pol)
+        self.pages.adjustSize()
 
     # ------------------------------------------------------------ session
     def _on_session(self, session, ws):

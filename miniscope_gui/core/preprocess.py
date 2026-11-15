@@ -19,6 +19,7 @@ MOVIE_FILE = "movie_pre.npy"
 TIMES_FILE = "frame_times_pre.npy"
 MEAN_FILE = "mean_projection.npy"
 MAX_FILE = "max_projection.npy"
+MASK_FILE = "roi_mask.npy"
 
 
 @dataclass
@@ -26,6 +27,7 @@ class PreprocessParams:
     start_s: float = 0.0
     end_s: float | None = None          # None = until the end
     crop: tuple[int, int, int, int] | None = None   # x, y, w, h in raw pixels
+    circle: bool = False                # keep only the ellipse inscribed in crop
     spatial_bin: int = 2                # 2 = average 2x2 pixels
     temporal_bin: int = 1               # 3 = average every 3 frames (30 -> 10 Hz)
     chunk_frames: int = 200
@@ -45,6 +47,13 @@ def output_shape(session: MiniscopeSession, p: PreprocessParams):
     x, y, w, h = p.crop if p.crop else (0, 0, session.width, session.height)
     b = max(1, p.spatial_bin)
     return h // b, w // b
+
+
+def roi_mask(H: int, W: int) -> np.ndarray:
+    """Boolean (H, W) mask of the ellipse inscribed in an H x W box."""
+    yy = (np.arange(H) + 0.5 - H / 2) / (H / 2)
+    xx = (np.arange(W) + 0.5 - W / 2) / (W / 2)
+    return yy[:, None] ** 2 + xx[None, :] ** 2 <= 1.0
 
 
 def frame_range(session: MiniscopeSession, p: PreprocessParams) -> tuple[int, int]:
@@ -82,6 +91,9 @@ def run_preprocess(session: MiniscopeSession, ws: Workspace, p: PreprocessParams
     times_all = session.frame_times_s()
     times = times_all[start:stop].reshape(n_out, tb).mean(axis=1)
 
+    # Circular selection: pixels outside the circle are set to 0 and the mask
+    # is saved so later steps can ignore them.
+    mask = roi_mask(H, W) if p.circle else None
     sum_img = np.zeros((H, W), np.float64)
     max_img = np.zeros((H, W), np.float32)
 
@@ -101,6 +113,8 @@ def run_preprocess(session: MiniscopeSession, ws: Workspace, p: PreprocessParams
             if nbuf == chunk or idx == stop - 1:
                 nb = nbuf // tb
                 block = buf[:nb * tb].reshape(nb, tb, H, W).mean(axis=1)
+                if mask is not None:
+                    block *= mask
                 sum_img += block.sum(axis=0)
                 np.maximum(max_img, block.max(axis=0), out=max_img)
                 np.rint(block, out=block)
@@ -115,12 +129,16 @@ def run_preprocess(session: MiniscopeSession, ws: Workspace, p: PreprocessParams
     np.save(ws.path(TIMES_FILE), times)
     np.save(ws.path(MEAN_FILE), (sum_img / max(out_i, 1)).astype(np.float32))
     np.save(ws.path(MAX_FILE), max_img)
+    if mask is not None:
+        np.save(ws.path(MASK_FILE), mask)
 
     params = asdict(p)
     params["frame_range"] = [start, stop]
     params["fps_out"] = session.fps / tb
     outputs = {"movie": MOVIE_FILE, "times": TIMES_FILE, "mean": MEAN_FILE,
                "max": MAX_FILE, "shape": [out_i, H, W]}
+    if mask is not None:
+        outputs["mask"] = MASK_FILE
     ws.record_step("preprocess", params, outputs)
     progress(1.0, "预处理完成")
     return outputs

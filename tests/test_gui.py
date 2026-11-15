@@ -23,6 +23,13 @@ def test_gui_flow(tmp_path, monkeypatch):
     w.import_page.set_output(str(tmp_path / "out"))
     assert w.session is not None and w.ws is not None
     w.pre_page.crop_cb.setChecked(True)
+    pp = w.pre_page.params()
+    assert pp.circle and pp.crop[2] == pp.crop[3]
+    w.pre_page.diam.setValue(40)
+    pp = w.pre_page.params()
+    assert pp.crop[2] == pp.crop[3] == 40
+    # right panel must fit its column even with a long source path
+    assert w.pages.minimumSizeHint().width() <= 400
     w.pre_page.tbin.setValue(2)
     w.pre_page._run()
     thread = w.thread

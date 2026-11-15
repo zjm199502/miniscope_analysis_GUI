@@ -15,3 +15,10 @@ def heading(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setStyleSheet("font-size: 16px; font-weight: bold; margin-top: 4px;")
     return lbl
+
+
+def wrappable(text: str) -> str:
+    """Let QLabel word-wrap long paths: add zero-width spaces after separators."""
+    for sep in ("\\", "/", "_"):
+        text = text.replace(sep, sep + "​")
+    return text

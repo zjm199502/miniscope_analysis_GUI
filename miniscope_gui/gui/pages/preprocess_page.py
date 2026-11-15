@@ -31,10 +31,14 @@ class PreprocessPage(QWidget):
         form.addRow("结束时间", self.end)
         form.addRow(hint("例如去掉开头动物刚放进去的几秒。"))
 
-        self.crop_cb = QCheckBox("在画面上框选分析区域")
+        self.crop_cb = QCheckBox("在画面上圈选分析区域")
         self.crop_cb.toggled.connect(self._toggle_roi)
         form.addRow(self.crop_cb)
-        form.addRow(hint("拖动画面上的黄色方框，只保留镜头视野内有细胞的区域。"))
+        self.diam = QSpinBox(); self.diam.setSuffix(" 像素"); self.diam.setEnabled(False)
+        self.diam.valueChanged.connect(self._diam_changed)
+        form.addRow("圆圈直径", self.diam)
+        form.addRow(hint("拖动黄色圆圈可以移动；拖动圆圈上的小方块，或修改上面的直径，可以放大缩小。"
+                         "只保留圆圈内镜头视野的区域，圆圈外的像素会被置为 0。"))
 
         self.sbin = QSpinBox(); self.sbin.setRange(1, 4); self.sbin.setValue(2)
         form.addRow("空间降采样", self.sbin)
@@ -82,30 +86,60 @@ class PreprocessPage(QWidget):
 
     def params(self) -> PreprocessParams:
         crop = None
+        circle = False
         if self.roi is not None and self.crop_cb.isChecked():
             x, y = (int(round(v)) for v in self.roi.pos())
-            w, h = (int(round(v)) for v in self.roi.size())
+            d = int(round(self.roi.size()[0]))
             x, y = max(0, x), max(0, y)
-            w = min(w, self.session.width - x)
-            h = min(h, self.session.height - y)
+            w = max(1, min(d, self.session.width - x))
+            h = max(1, min(d, self.session.height - y))
             crop = (x, y, w, h)
+            circle = True
         end = self.end.value()
         return PreprocessParams(
             start_s=self.start.value(),
             end_s=None if end >= self.session.duration_s - 1e-6 else end,
-            crop=crop, spatial_bin=self.sbin.value(), temporal_bin=self.tbin.value())
+            crop=crop, circle=circle, spatial_bin=self.sbin.value(), temporal_bin=self.tbin.value())
 
     def _toggle_roi(self, on):
         if on and self.session is not None:
             w, h = self.session.width, self.session.height
             if self.roi is None:
-                self.roi = pg.RectROI([w * 0.1, h * 0.1], [w * 0.8, h * 0.8],
-                                      pen=pg.mkPen("y", width=2), maxBounds=pg.QtCore.QRectF(0, 0, w, h))
-                self.roi.sigRegionChanged.connect(self._update_estimate)
+                d = 0.8 * min(w, h)
+                self.roi = pg.CircleROI([(w - d) / 2, (h - d) / 2], [d, d],
+                                        pen=pg.mkPen("y", width=2),
+                                        hoverPen=pg.mkPen("c", width=3),
+                                        handlePen=pg.mkPen("c", width=2),
+                                        maxBounds=pg.QtCore.QRectF(0, 0, w, h))
+                self.roi.sigRegionChanged.connect(self._roi_changed)
+            self.diam.blockSignals(True)
+            self.diam.setRange(8, min(w, h))
+            self.diam.setValue(int(round(self.roi.size()[0])))
+            self.diam.blockSignals(False)
             self.view.vb.addItem(self.roi)
         elif self.roi is not None:
             self.view.vb.removeItem(self.roi)
+        self.diam.setEnabled(bool(on and self.roi is not None))
         self._update_estimate()
+
+    def _roi_changed(self):
+        self.diam.blockSignals(True)
+        self.diam.setValue(int(round(self.roi.size()[0])))
+        self.diam.blockSignals(False)
+        self._update_estimate()
+
+    def _diam_changed(self, d):
+        """Resize the circle about its centre, keeping it inside the image."""
+        if self.roi is None or self.session is None:
+            return
+        w, h = self.session.width, self.session.height
+        d = float(min(d, w, h))
+        (x0, y0), s0 = self.roi.pos(), self.roi.size()[0]
+        cx, cy = x0 + s0 / 2, y0 + s0 / 2
+        x = min(max(cx - d / 2, 0.0), w - d)
+        y = min(max(cy - d / 2, 0.0), h - d)
+        self.roi.setPos([x, y], update=False)
+        self.roi.setSize([d, d])
 
     def _update_estimate(self):
         if self.session is None:

@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (QFileDialog, QLabel, QLineEdit, QMessageBox,
 
 from ...core.workspace import Workspace, WorkspaceError
 from ...io.ucla_v4 import MiniscopeSession
-from .common import heading, hint
+from .common import heading, hint, wrappable
 
 
 class ImportPage(QWidget):
@@ -56,7 +56,7 @@ class ImportPage(QWidget):
             QMessageBox.warning(self, "无法读取", str(e))
             return
         self.src_edit.setText(d)
-        self.info.setText(self.session.summary_zh())
+        self.info.setText(wrappable(self.session.summary_zh()))
         self._maybe_ready()
 
     def pick_output(self):

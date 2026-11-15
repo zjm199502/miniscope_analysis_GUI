@@ -95,3 +95,18 @@ def test_preprocess_memory_is_bounded(tmp_path):
     # on chunk size (50 binned frames = 8 MB float32), not on movie length
     assert peak < 40e6, peak  # measured ~25 MB for both 300 and 900 frames
     assert load_movie(ws).shape == (600, 200, 200)
+
+
+def test_preprocess_circle(tmp_path, session):
+    s, frames = session
+    ws = Workspace.create_or_open(tmp_path / "out", source_folder=s.folder)
+    p = PreprocessParams(crop=(10, 4, 56, 56), circle=True, spatial_bin=2, chunk_frames=64)
+    out = run_preprocess(s, ws, p)
+    mov = load_movie(ws)
+    assert mov.shape == (250, 28, 28)
+    mask = np.load(ws.path(out["mask"]))
+    assert mask.shape == (28, 28) and mask[14, 14] and not mask[0, 0]
+    assert (mov[:, ~mask] == 0).all()
+    expected = frames[0, 4:60, 10:66].astype(np.float32).reshape(28, 2, 28, 2).mean(axis=(1, 3))
+    assert np.abs(mov[0][mask].astype(float) - expected[mask]).max() <= 1
+    assert ws.step("preprocess")["params"]["circle"] is True
