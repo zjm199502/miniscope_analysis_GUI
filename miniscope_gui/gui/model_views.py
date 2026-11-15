@@ -108,6 +108,7 @@ class Painter:
         if legend:
             tr.addLegend(offset=(-10, 5))
         tr.getAxis("bottom").setTicks(None)
+        tr.getAxis("left").enableAutoSIPrefix(True)
         self.main.model_overlays = True
         tr.setTitle(title)
         tr.setLabel("bottom", xlabel)
@@ -425,13 +426,113 @@ class Painter:
         self.hist(mi, f"与「{names[0]}」的互信息分布（显著 {int(sig.sum())} / {len(sig)} 个）", "bits")
 
 
+    # ----------------------------------------------------------- kinetics
+    def _kin_criterion(self, r, level):
+        crit = (r.get("summary", {}).get(level, {}) or {}).get("criterion", "icl")
+        pre = "ev" if level == "event" else "cell"
+        return ("ICL", r[f"{pre}_icl"]) if crit == "icl" and f"{pre}_icl" in r else ("BIC", r[f"{pre}_bic"])
+
+    def _kin_scatter(self, r, level):
+        pre = "ev" if level == "event" else "cell"
+        sl = r["summary"][level]
+        if "skipped" in sl:
+            raise ValueError(f"{'事件' if level == 'event' else '细胞'}层面没有聚类：{sl['skipped']}")
+        lab = r[f"{pre}_label"]
+        pc = r[f"{pre}_pc"]
+        ok = (lab >= 0) & np.isfinite(pc).all(1)
+        idx = np.flatnonzero(ok)
+        if len(idx) > 6000:
+            idx = np.sort(np.random.default_rng(0).choice(idx, 6000, replace=False))
+        from ..core.modeling.kinetics import CLUSTER_CHOICES
+        names = "、".join(CLUSTER_CHOICES.get(str(f), str(f)) for f in sl["features"])
+        what = "事件" if level == "event" else "细胞"
+        self.scatter_view(pc[idx, 0], -pc[idx, 1], [colour(c) for c in lab[idx]],
+                          f"每个点是一个{what}（指标 {names} 标准化后的前两个主成分），颜色 = 类别 1–{sl['K']}",
+                          size=5 if level == "event" else 10)
+        name, crit = self._kin_criterion(r, level)
+        ks = r[f"{pre}_ks"]
+        tr = self.plot(f"类别数选择：{name} 越低越好，选中 K = {sl['K']}", "类别数 K", name)
+        tr.plot(ks, crit, pen=pg.mkPen(BLUE, width=2), symbol="o", symbolBrush=BLUE)
+        tr.getAxis("bottom").setTicks([[(int(k), str(int(k))) for k in ks]])
+        tr.addItem(pg.InfiniteLine(sl["K"], angle=90, pen=pg.mkPen(RED, width=2)))
+
+    def kin_ev_scatter(self, r):
+        self._kin_scatter(r, "event")
+
+    def kin_cell_scatter(self, r):
+        self._kin_scatter(r, "cell")
+
+    def _waves(self, t, mean, sem, title, label):
+        tr = self.plot(title, "相对峰值的时间（秒）", "ΔF/F / 峰值", legend=True)
+        for c, (m, e) in enumerate(zip(mean, sem)):
+            col = colour(c)
+            m, e = np.nan_to_num(m), np.nan_to_num(e)
+            hi = tr.plot(t, m + e, pen=pg.mkPen((*col, 0)))
+            lo = tr.plot(t, m - e, pen=pg.mkPen((*col, 0)))
+            tr.addItem(pg.FillBetweenItem(hi, lo, brush=(*col, 60)))
+            tr.plot(t, m, pen=pg.mkPen(col, width=2), name=f"{label} {c + 1}")
+        tr.addItem(pg.InfiniteLine(0, angle=90, pen=pg.mkPen((120, 120, 120), style=Qt.DashLine)))
+        return tr
+
+    def kin_ev_wave(self, r):
+        sl = r["summary"]["event"]
+        if "skipped" in sl:
+            raise ValueError(f"事件层面没有聚类：{sl['skipped']}")
+        W = np.nan_to_num(r["ev_wave_sub"])
+        t = r["wave_t"]
+        self.heat(np.clip(W, -0.3, 1.2).T, f"{len(W)} 个事件的波形（每列一个事件，按类别 1–{sl['K']} 从左到右排列，"
+                  "已按峰值归一化；从上到下 = 时间，白线分隔各类）", "viridis",
+                  rect=(0, t[0], len(W), t[-1] - t[0]))
+        lab = r["ev_wave_sub_label"]
+        edges = np.flatnonzero(np.diff(lab)) + 1
+        for e in edges:
+            self.view.add_overlay(pg.InfiniteLine(e, angle=90, pen=pg.mkPen("w", width=2)))
+        self.main.model_overlays = True
+        self._waves(t, r["ev_wave_mean"], r["ev_wave_sem"], "各类事件的平均波形（阴影 = 标准误）", "事件类")
+
+    def kin_map(self, r):
+        lab = r["cell_label"]
+        s = r["summary"]
+        if lab.max() >= 0:
+            col = [colour(c) if c >= 0 else GREY for c in lab]
+            self.cell_map(r, col, f"细胞层面的类别（颜色 = 类别 1–{s['cell']['K']}，灰色 = 事件太少未参与）",
+                          sizes=np.where(lab >= 0, 11, 7))
+            self._waves(r["wave_t"], r["cell_wave_mean"], r["cell_wave_sem"],
+                        "各类细胞的平均事件波形（阴影 = 标准误）", "细胞类")
+        elif "cell_dominant" in r:
+            dom = r["cell_dominant"]
+            col = [colour(c) if c >= 0 else GREY for c in dom]
+            self.cell_map(r, col, "细胞层面没有聚类，按每个细胞最主要的事件类别着色（灰色 = 没有可用事件）")
+            self._waves(r["wave_t"], r["ev_wave_mean"], r["ev_wave_sem"], "各类事件的平均波形", "事件类")
+        else:
+            raise ValueError("事件和细胞层面都没有得到聚类结果")
+
+    def kin_check(self, r):
+        C = r["cell_feat"]
+        names = [str(n) for n in r["cell_feat_names"]]
+        tau, snr = C[:, names.index("decay_tau_s")], C[:, names.index("snr")]
+        ok = np.isfinite(tau) & np.isfinite(snr) & (tau > 0) & (snr > 0)
+        if ok.sum() < 2:
+            raise ValueError("可用的细胞太少，无法画混杂检查图")
+        lab = r["cell_label"]
+        ls = np.log10(np.where(snr > 0, snr, np.nan))
+        col = [c if np.isfinite(v) else GREY for c, v in zip(_ramp(np.nan_to_num(ls, nan=np.nanmin(ls))), ls)]
+        self.cell_map(r, col, "每个细胞的信噪比（事件振幅 / 噪声；越亮越强）。对照细胞图里的类别，看类别是否只是按亮暗分开")
+        rr = r["summary"]["cell"].get("r_tau_snr")
+        rt = "—" if rr is None else f"{rr:.2f}"
+        tr = self.plot(f"混杂检查：衰减 τ 与信噪比（相关 r = {rt}，|r| 大说明测得的动力学受信号强弱影响；颜色 = 细胞类别）",
+                       "log10 信噪比", "log10 衰减 τ（秒）")
+        tr.getAxis("left").enableAutoSIPrefix(False)
+        tr.addItem(pg.ScatterPlotItem(x=ls[ok], y=np.log10(tau[ok]), size=9, pen=pg.mkPen((0, 0, 0, 120)),
+                                      brush=[pg.mkBrush(*(colour(c) if c >= 0 else GREY)) for c in lab[ok]]))
+
 def show(main, key: str):
     """Draw the result view `key` (e.g. 'glm_map')."""
     prefix = {"glm": "glm", "dec": "decoder", "ens": "ensembles", "emb": "embedding", "hmm": "hmm",
-              "net": "network", "info": "info"}[key.split("_")[0]]
+              "net": "network", "info": "info", "kin": "kinetics"}[key.split("_")[0]]
     res = load_result(main.ws, prefix)
     getattr(Painter(main), key)(res)
 
 
 def is_model_view(key: str) -> bool:
-    return key.split("_")[0] in ("glm", "dec", "ens", "emb", "hmm", "net", "info") and "_" in key
+    return key.split("_")[0] in ("glm", "dec", "ens", "emb", "hmm", "net", "info", "kin") and "_" in key

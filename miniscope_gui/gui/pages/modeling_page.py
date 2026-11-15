@@ -5,7 +5,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import (QFileDialog, QFormLayout, QGridLayout, QLabel, QLineEdit,
                                QMessageBox, QPushButton, QWidget)
 
-from ...core.modeling import decoder, embedding, ensembles, glm, hmm, info, network
+from ...core.modeling import decoder, embedding, ensembles, glm, hmm, info, kinetics, network
 from ...core.modeling.common import has_behavior, load_result
 from ...core.modeling.report import ANALYSES, VIEWS, describe, export_all
 from .base import StepPage
@@ -13,7 +13,7 @@ from .common import heading, hint
 
 RUNNERS = {"glm": glm.run_glm, "decoder": decoder.run_decoder, "ensembles": ensembles.run_ensembles,
            "embedding": embedding.run_embedding, "hmm": hmm.run_hmm, "network": network.run_network,
-           "info": info.run_info}
+           "info": info.run_info, "kinetics": kinetics.run_kinetics}
 SIGNALS = ["ΔF/F", "spike 事件"]
 
 
@@ -142,20 +142,50 @@ class ModelingPage(StepPage):
                                     "只用速度高于此值的时刻计算空间信息（单位同行为分析）。0 = 全部使用。")
         self.info_shuf = self._row(f, "打乱次数", self.spin(50, 5000, 500, 100))
 
+        f = self._form("kinetics")
+        self.kin_smooth = self._row(f, "平滑", self.dspin(0, 1, 0.05, 0.01, 2, " 秒"),
+                                    "测量前对 ΔF/F 做轻度高斯平滑以压低噪声。越大越平滑，但上升时间会被拉长；0 = 不平滑。")
+        self.kin_thr = self._row(f, "事件阈值", self.dspin(1.5, 10, 3.0, 0.5, 1, " 倍噪声"),
+                                 "从事件前的低谷到峰值至少升高这么多倍噪声才算一个事件。")
+        self.kin_decay = self._row(f, "衰减窗口", self.dspin(1, 30, 6, 1, 0, " 秒"),
+                                   "峰值之后最多用多长时间拟合衰减。慢指示剂（GCaMP6s）可以加大。")
+        self.kin_iso = self._row(f, "", self.check("只用孤立事件测量和聚类（推荐）", True),
+                                 "孤立事件：前面的基线已回落，衰减在下一个事件前降到 20% 以下。叠加事件的衰减测不准。")
+        self.kin_feat = {}
+        g = QGridLayout()
+        defaults = set(kinetics.KineticsParams().features)
+        for i, (k, label) in enumerate(kinetics.CLUSTER_CHOICES.items()):
+            c = self.check(label, k in defaults)
+            self.kin_feat[k] = c
+            g.addWidget(c, i // 3, i % 3)
+        f.addRow("聚类指标", g)
+        f.addRow(hint("前几项按每个事件计算；细胞层面用每个细胞的中位数，「事件频率」「爆发性」只用于细胞层面。"
+                      "振幅、面积默认不用：它们主要反映指示剂表达量和信噪比。"))
+        self.kin_min = self._row(f, "每个细胞最少事件", self.spin(2, 200, 5),
+                                 "事件少于这个数的细胞不参与细胞层面的聚类（中位数不可靠）。")
+        self.kin_kmax = self._row(f, "最多类别数", self.spin(2, 10, 6))
+        self.kin_k = self._row(f, "固定类别数", self.spin(0, 10, 0),
+                               "0 = 自动选择（推荐）。只在想比较某个特定类别数时填写。")
+        self.kin_crit = self._row(f, "选择标准", self.combo(["ICL（推荐，偏向分得开的类别）", "BIC"]),
+                                  "BIC 在事件多时容易把一个偏态分布切成好几类；ICL 额外惩罚互相重叠的类别。")
+        self.kin_boot = self._row(f, "重抽样次数", self.spin(10, 500, 50, 10),
+                                  "用于检验类别是否稳定，越多越可靠也越慢。")
+
         self.kind.currentIndexChanged.connect(self._on_kind)
 
     def build_extra(self):
         self.lay.addWidget(heading("查看结果"))
         self.grid = QGridLayout()
         self.view_buttons = []
-        for i in range(3):
+        n = max(len(v) for v in VIEWS.values())
+        for i in range(n):
             b = QPushButton("")
             b.clicked.connect(lambda _=False, i=i: self._show(i))
             self.grid.addWidget(b, i // 2, i % 2)
             self.view_buttons.append(b)
         self.export_btn = QPushButton("导出全部建模结果…")
         self.export_btn.clicked.connect(self._export)
-        self.grid.addWidget(self.export_btn, 1, 1)
+        self.grid.addWidget(self.export_btn, n // 2, n % 2)
         self.lay.addLayout(self.grid)
         self.result_lbl = QLabel("")
         self.result_lbl.setWordWrap(True)
@@ -258,6 +288,14 @@ class ModelingPage(StepPage):
                                       threshold="shuffle" if self.net_thr.currentIndex() == 0 else "density",
                                       percentile=self.net_pct.value(), density=self.net_density.value() / 100.0,
                                       by_state=self.net_state.isChecked())
+        elif key == "kinetics":
+            p = kinetics.KineticsParams(smooth_s=self.kin_smooth.value(), threshold_sd=self.kin_thr.value(),
+                                        max_decay_s=self.kin_decay.value(), isolated_only=self.kin_iso.isChecked(),
+                                        features=tuple(k for k, c in self.kin_feat.items() if c.isChecked()),
+                                        min_events=self.kin_min.value(), max_k=self.kin_kmax.value(),
+                                        force_k=self.kin_k.value(),
+                                        criterion="icl" if self.kin_crit.currentIndex() == 0 else "bic",
+                                        n_boot=self.kin_boot.value())
         else:
             p = info.InfoParams(bin_s=self.info_bin.value(), signal=sig(self.info_signal),
                                 n_spatial_bins=self.info_nbin.value(), min_speed=self.info_speed.value(),
