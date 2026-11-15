@@ -1,8 +1,8 @@
 """Step 1 preprocessing: time range, crop, spatial and temporal downsampling.
 
 The result is written chunk by chunk to ``movie_pre.npy`` (a memory-mappable
-array of shape (T, H, W), uint8), so memory use stays at a few hundred MB no
-matter how long the recording is.
+array of shape (T, H, W), uint8). Frames are binned one at a time as they are
+read, so memory use is ~100-200 MB regardless of recording length.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ class PreprocessParams:
     crop: tuple[int, int, int, int] | None = None   # x, y, w, h in raw pixels
     spatial_bin: int = 2                # 2 = average 2x2 pixels
     temporal_bin: int = 1               # 3 = average every 3 frames (30 -> 10 Hz)
-    chunk_frames: int = 500
+    chunk_frames: int = 200
 
 
 def bin_spatial(block: np.ndarray, b: int) -> np.ndarray:
@@ -72,34 +72,45 @@ def run_preprocess(session: MiniscopeSession, ws: Workspace, p: PreprocessParams
     H, W = output_shape(session, p)
     x, y, w, h = p.crop if p.crop else (0, 0, session.width, session.height)
 
+    # Write the .npy header once, then append frames with plain file writes.
+    # Unlike a writable memmap this keeps no growing page cache attributed to
+    # the process (Windows counts dirty mapped pages as process memory).
     from numpy.lib.format import open_memmap
-    movie = open_memmap(ws.path(MOVIE_FILE), mode="w+", dtype=np.uint8, shape=(n_out, H, W))
+    mm = open_memmap(ws.path(MOVIE_FILE), mode="w+", dtype=np.uint8, shape=(n_out, H, W))
+    header_len = mm.offset
+    del mm
     times_all = session.frame_times_s()
     times = times_all[start:stop].reshape(n_out, tb).mean(axis=1)
 
     sum_img = np.zeros((H, W), np.float64)
     max_img = np.zeros((H, W), np.float32)
 
+    # Bin each frame as soon as it is read, so only small binned frames are
+    # buffered: memory ~ chunk_frames * H * W * 4 bytes (e.g. 200*300*300*4 = 72 MB).
     chunk = max(tb, (p.chunk_frames // tb) * tb)
+    buf = np.empty((chunk, H, W), np.float32)
+    nbuf = 0
     out_i = 0
-    buf = []
-    for idx, frame in session.iter_frames(start, stop):
-        if should_stop():
-            raise InterruptedError("已取消")
-        buf.append(frame[y:y + h, x:x + w])
-        if len(buf) == chunk or idx == stop - 1:
-            block = bin_spatial(np.stack(buf), p.spatial_bin)
-            nb = block.shape[0] // tb
-            block = block[:nb * tb].reshape(nb, tb, H, W).mean(axis=1)
-            block8 = np.clip(np.rint(block), 0, 255).astype(np.uint8)
-            movie[out_i:out_i + nb] = block8
-            sum_img += block.sum(axis=0)
-            np.maximum(max_img, block.max(axis=0), out=max_img)
-            out_i += nb
-            buf = []
-            progress(out_i / n_out, f"预处理 {out_i}/{n_out} 帧")
-    movie.flush()
-    del movie
+    with open(ws.path(MOVIE_FILE), "r+b") as fh:
+        fh.seek(header_len)
+        for idx, frame in session.iter_frames(start, stop):
+            if should_stop():
+                raise InterruptedError("已取消")
+            buf[nbuf] = bin_spatial(frame[None, y:y + h, x:x + w], p.spatial_bin)[0][:H, :W]
+            nbuf += 1
+            if nbuf == chunk or idx == stop - 1:
+                nb = nbuf // tb
+                block = buf[:nb * tb].reshape(nb, tb, H, W).mean(axis=1)
+                sum_img += block.sum(axis=0)
+                np.maximum(max_img, block.max(axis=0), out=max_img)
+                np.rint(block, out=block)
+                np.clip(block, 0, 255, out=block)
+                fh.write(block.astype(np.uint8).tobytes())
+                out_i += nb
+                nbuf = 0
+                progress(out_i / n_out, f"预处理 {out_i}/{n_out} 帧")
+    if out_i != n_out:
+        raise IOError(f"只读到 {out_i}/{n_out} 帧，视频文件可能损坏")
 
     np.save(ws.path(TIMES_FILE), times)
     np.save(ws.path(MEAN_FILE), (sum_img / max(out_i, 1)).astype(np.float32))
