@@ -1,7 +1,8 @@
 """Step 1 preprocessing: time range, crop, spatial and temporal downsampling.
 
 The result is written chunk by chunk to ``movie_pre.npy`` (a memory-mappable
-array of shape (T, H, W), uint8). Frames are binned one at a time as they are
+array of shape (T, H, W), float16 - keeps the sub-count precision gained by
+spatial/temporal averaging). Frames are binned one at a time as they are
 read, so memory use is ~100-200 MB regardless of recording length.
 """
 
@@ -21,6 +22,9 @@ TIMES_FILE = "frame_times_pre.npy"
 MEAN_FILE = "mean_projection.npy"
 MAX_FILE = "max_projection.npy"
 MASK_FILE = "fov_mask.npy"
+# float16: 2 bytes/pixel, ~0.06 count resolution at typical values. uint8 would
+# throw away most of a 1-photon cell signal (a few counts) after averaging.
+MOVIE_DTYPE = np.float16
 
 
 @dataclass
@@ -119,7 +123,7 @@ def run_preprocess(session: MiniscopeSession, ws: Workspace, p: PreprocessParams
     buf = np.empty((chunk, H, W), np.float32)
     nbuf = 0
     out_i = 0
-    with MovieWriter(ws.path(MOVIE_FILE), (n_out, H, W)) as writer:
+    with MovieWriter(ws.path(MOVIE_FILE), (n_out, H, W), MOVIE_DTYPE) as writer:
         for idx, frame in session.iter_frames(start, stop):
             if should_stop():
                 raise InterruptedError("已取消")
@@ -132,9 +136,7 @@ def run_preprocess(session: MiniscopeSession, ws: Workspace, p: PreprocessParams
                 block = buf[:nb * tb].reshape(nb, tb, H, W).mean(axis=1)
                 sum_img += block.sum(axis=0)
                 np.maximum(max_img, block.max(axis=0), out=max_img)
-                np.rint(block, out=block)
-                np.clip(block, 0, 255, out=block)
-                writer.write(block.astype(np.uint8))
+                writer.write(block.astype(MOVIE_DTYPE))
                 out_i += nb
                 nbuf = 0
                 progress(out_i / n_out, f"预处理 {out_i}/{n_out} 帧")

@@ -47,7 +47,7 @@ class ExtractionParams:
     merge_threshold: float = 0.8  # temporal correlation for merging overlapping cells
     n_iterations: int = 2
     min_area_fraction: float = 0.15   # of a disk with the cell diameter
-    chunk_frames: int = 300
+    chunk_frames: int = 200
 
 
 # --------------------------------------------------------------- utilities
@@ -81,40 +81,69 @@ def _shift2d(img, dy, dx):
 
 
 # ------------------------------------------------------- 1. summary images
-def summary_images(movie, sigma: float, chunk: int, progress, should_stop):
+def _neighbour_slices(H, W, dy, dx):
+    """Slices (a, b) so that img[a] and img[b] are neighbours at offset (dy, dx)."""
+    ya = slice(max(0, -dy), H - max(0, dy)); xa = slice(max(0, -dx), W - max(0, dx))
+    yb = slice(max(0, dy), H - max(0, -dy)); xb = slice(max(0, dx), W - max(0, -dx))
+    return (ya, xa), (yb, xb)
+
+
+def summary_images(movie, sigma: float, chunk: int, progress, should_stop, mask=None,
+                   noise_thr: float = 3.0):
+    """Local correlation image and PNR image, as in CNMF-E.
+
+    Pass 1: per-pixel mean, max and noise of the smoothed movie (PNR).
+    Pass 2: neighbour correlation of the smoothed movie after setting values
+    below noise_thr x noise to zero. Without this thresholding, smoothing
+    alone makes neighbouring noise pixels correlate (~0.7) and the map
+    saturates.
+    """
     T, H, W = movie.shape
-    s1 = np.zeros((H, W)); s2 = np.zeros((H, W)); mx = np.full((H, W), -np.inf)
+    s1 = np.zeros((H, W)); mx = np.full((H, W), -np.inf, np.float32)
     d2 = np.zeros((H, W)); prev = None
-    cross = np.zeros((len(_OFFSETS), H, W))
     for a, b in _chunks(T, chunk):
         if should_stop():
             raise InterruptedError("已取消")
-        Yf = _smooth(np.asarray(movie[a:b]), sigma).astype(np.float64)
-        s1 += Yf.sum(0); s2 += (Yf ** 2).sum(0)
+        Yf = _smooth(np.asarray(movie[a:b], np.float32), sigma)
+        s1 += Yf.sum(0, dtype=np.float64)
         np.maximum(mx, Yf.max(0), out=mx)
-        dd = np.diff(Yf, axis=0)
-        d2 += (dd ** 2).sum(0)
+        d2 += (np.diff(Yf, axis=0) ** 2).sum(0, dtype=np.float64)
         if prev is not None:
             d2 += (Yf[0] - prev) ** 2
         prev = Yf[-1]
-        for i, (dy, dx) in enumerate(_OFFSETS):
-            sh = np.nan_to_num(_shift2d(Yf, dy, dx))
-            cross[i] += (Yf * sh).sum(0)
-        progress(b / T * 0.25, f"计算相关图 {b}/{T}")
-    mean = s1 / T
-    var = np.maximum(s2 / T - mean ** 2, 1e-12)
-    std = np.sqrt(var)
-    cn_sum = np.zeros((H, W)); cnt = np.zeros((H, W))
-    for i, (dy, dx) in enumerate(_OFFSETS):
-        m2 = _shift2d(mean, dy, dx)
-        s2_ = _shift2d(std, dy, dx)
-        c = (cross[i] / T - mean * m2) / (std * s2_)
-        ok = ~np.isnan(c)
-        cn_sum[ok] += c[ok]; cnt[ok] += 1
-    cn = cn_sum / np.maximum(cnt, 1)
-    noise = np.sqrt(d2 / max(T - 1, 1) / 2.0)
+        progress(b / T * 0.12, f"计算 PNR 图 {b}/{T}")
+    mean = (s1 / T).astype(np.float32)
+    noise = np.sqrt(d2 / max(T - 1, 1) / 2.0).astype(np.float32)
     pnr = (mx - mean) / np.maximum(noise, 1e-6)
-    return cn.astype(np.float32), pnr.astype(np.float32), mean, std
+
+    # pass 2: thresholded correlation
+    thr = mean + noise_thr * noise
+    t1 = np.zeros((H, W)); t2 = np.zeros((H, W))
+    cross = np.zeros((len(_OFFSETS), H, W))
+    sl = [_neighbour_slices(H, W, dy, dx) for dy, dx in _OFFSETS]
+    for a, b in _chunks(T, chunk):
+        if should_stop():
+            raise InterruptedError("已取消")
+        Yf = _smooth(np.asarray(movie[a:b], np.float32), sigma) - mean
+        Yf[Yf < (thr - mean)] = 0.0
+        t1 += Yf.sum(0, dtype=np.float64)
+        t2 += (Yf * Yf).sum(0, dtype=np.float64)
+        for i, ((ya, xa), (yb, xb)) in enumerate(sl):
+            cross[i][ya, xa] += (Yf[:, ya, xa] * Yf[:, yb, xb]).sum(0, dtype=np.float64)
+        progress(0.12 + b / T * 0.13, f"计算相关图 {b}/{T}")
+    m = t1 / T
+    sd = np.sqrt(np.maximum(t2 / T - m * m, 0))
+    cn_sum = np.zeros((H, W)); cnt = np.zeros((H, W))
+    for i, ((ya, xa), (yb, xb)) in enumerate(sl):
+        num = cross[i][ya, xa] / T - m[ya, xa] * m[yb, xb]
+        den = sd[ya, xa] * sd[yb, xb]
+        c = np.where(den > 0, num / np.where(den > 0, den, 1), 0.0)
+        cn_sum[ya, xa] += c; cnt[ya, xa] += 1
+    cn = cn_sum / np.maximum(cnt, 1)
+    if mask is not None:
+        cn[~mask] = 0
+        pnr[~mask] = 0
+    return cn.astype(np.float32), pnr.astype(np.float32), mean, noise
 
 
 # ------------------------------------------------------------------ 2. seeds
@@ -122,7 +151,9 @@ def find_seeds(cn, pnr, p: ExtractionParams, mask=None):
     score = cn * pnr
     ok = (cn >= p.min_corr) & (pnr >= p.min_pnr)
     if mask is not None:
-        ok &= mask
+        # no seeds within ~0.75 cell diameter of the field-of-view edge (vignetted tissue)
+        r_edge = max(1, int(round(0.75 * p.cell_diameter)))
+        ok &= ndimage.binary_erosion(mask, structure=np.ones((3, 3), bool), iterations=r_edge)
     r = max(1, int(round(p.cell_diameter * 0.5)))
     local_max = score == ndimage.maximum_filter(score, size=2 * r + 1)
     cand = np.argwhere(ok & local_max)
@@ -156,7 +187,7 @@ class _Patches:
         return block[:, y0:y1, x0:x1].reshape(block.shape[0], -1)
 
 
-def _clean_footprint(a_patch, box, centre=None, rel_thr=0.1):
+def _clean_footprint(a_patch, box, centre=None, rel_thr=0.3):
     """Keep the connected component around the peak (or centre); zero the rest."""
     y0, y1, x0, x1 = box
     img = a_patch.reshape(y1 - y0, x1 - x0).copy()
@@ -206,7 +237,7 @@ def run_extraction(session, ws: Workspace, p: ExtractionParams,
     chunk = max(50, int(p.chunk_frames))
 
     # 1. summary images
-    cn, pnr, _, _ = summary_images(Y, sigma, chunk, progress, should_stop)
+    cn, pnr, _, _ = summary_images(Y, sigma, chunk, progress, should_stop, mask)
     np.save(ws.path(CN_FILE), cn)
     np.save(ws.path(PNR_FILE), pnr)
 
@@ -216,7 +247,7 @@ def run_extraction(session, ws: Workspace, p: ExtractionParams,
     progress(0.27, f"找到 {K} 个候选细胞")
     if K == 0:
         raise ValueError("没有找到符合条件的细胞。可以降低「最小相关」或「最小 PNR」再试。")
-    R = int(np.ceil(p.cell_diameter))
+    R = int(np.ceil(1.5 * p.cell_diameter))   # patch half-width: room for the whole cell
     patches = _Patches(seeds, H, W, R)
 
     # 3. init: seed traces + correlation of each patch pixel with its seed trace

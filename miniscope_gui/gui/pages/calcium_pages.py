@@ -127,7 +127,8 @@ class ExtractionPage(StepPage):
 class SignalsPage(StepPage):
     step_key = "signals"
     title = "6. 信号与 spike"
-    intro = ("ΔF/F：细胞荧光相对基线的变化比例，基线取一段时间窗内的低百分位数。"
+    intro = ("ΔF/F：细胞荧光的变化量除以细胞所在位置的基线荧光（取一段时间窗内的低百分位数）。"
+             "单光子数据的基线包含大量背景荧光，所以典型值在 0.02–0.3 之间，比双光子小。"
              "spike：用 OASIS 算法从钙信号反推出放电事件的时间和大小。")
     run_label = "计算信号"
     results = (("traces", "所有细胞活动（热图）"), ("cells", "单个细胞曲线"))
@@ -141,13 +142,13 @@ class SignalsPage(StepPage):
         self.indicator.currentTextChanged.connect(self._sync_tau)
         self.win = self.add_param("基线窗口", self.dspin(5, 600, 60, 5, 0, " 秒"),
                                   "在这个时间窗内取低百分位数作为基线 F0。")
-        self.thr = self.add_param("spike 阈值", self.dspin(0.5, 10, 2.5, 0.5, 1, " × 噪声"),
+        self.thr = self.add_param("spike 阈值", self.dspin(0.5, 10, 3.0, 0.5, 1, " × 噪声"),
                                   "小于这个大小的事件不算 spike。数值越大越保守。")
         self._sync_tau(self.indicator.currentText())
 
     def build_extra(self):
         self.lay.addWidget(heading("导出"))
-        self.lay.addWidget(hint("导出 ΔF/F、spike、细胞位置等 CSV 文件（Excel 可直接打开）"
+        self.lay.addWidget(hint("导出 ΔF/F、z-score、spike、细胞位置等 CSV 文件（Excel 可直接打开）"
                                 "和一个 MATLAB 的 .mat 文件。只导出检查时保留的细胞。"))
         self.export_btn = QPushButton("导出结果…")
         self.export_btn.clicked.connect(self._export)

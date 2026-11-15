@@ -8,7 +8,7 @@ import numpy as np
 from scipy import io as sio
 
 from .extraction import footprint_image, load_cells
-from .signals import load_signals
+from .signals import event_counts, load_signals
 from .workspace import Workspace
 
 
@@ -29,9 +29,12 @@ def export_results(ws: Workspace, folder: str | Path | None = None, accepted_onl
     _write_trace_csv(out / "dff.csv", t, sig["dff"][keep], ids)
     _write_trace_csv(out / "spikes.csv", t, sig["spikes"][keep], ids)
     _write_trace_csv(out / "denoised.csv", t, sig["denoised"][keep], ids)
+    d = sig["dff"][keep]
+    z = (d - d.mean(1, keepdims=True)) / np.maximum(d.std(1, keepdims=True), 1e-12)
+    _write_trace_csv(out / "zscore.csv", t, z, ids)
     cen = cells["centres"][keep]
     info = np.column_stack([ids, cen[:, 1], cen[:, 0], cells["area"][keep], cells["snr"][keep],
-                            (sig["spikes"][keep] > 0).sum(1) / max(t[-1] - t[0], 1e-9)])
+                            event_counts(sig["spikes"][keep]) / max(t[-1] - t[0], 1e-9)])
     np.savetxt(out / "cells.csv", info, delimiter=",", comments="",
                header="cell_id,x,y,area_px,snr,event_rate_hz", fmt="%.5g")
     H, W = cells["shape"]

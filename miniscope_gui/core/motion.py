@@ -18,7 +18,7 @@ from typing import Callable
 import cv2
 import numpy as np
 
-from .preprocess import MOVIE_FILE, load_movie
+from .preprocess import MOVIE_DTYPE, load_movie
 from .storage import MovieWriter
 from .workspace import Workspace
 
@@ -165,7 +165,7 @@ def build_template(movie, p: MotionParams, reg: _Registrar) -> np.ndarray:
     n = min(p.template_frames, movie.shape[0])
     # spread template frames over the first part of the recording
     idx = np.linspace(0, movie.shape[0] - 1, num=min(movie.shape[0], max(n, 1) * 3)).astype(int)[:n]
-    frames = [bandpass(movie[i], p.filter_sigma, p.bg_sigma) for i in idx]
+    frames = [bandpass(np.asarray(movie[i], np.float32), p.filter_sigma, p.bg_sigma) for i in idx]
     template = np.median(np.stack(frames), axis=0).astype(np.float32)
     for _ in range(max(1, p.iterations)):
         aligned = []
@@ -193,11 +193,11 @@ def run_motion_correction(session, ws: Workspace, p: MotionParams,
     windows: dict = {}
     sum_img = np.zeros((H, W), np.float64)
     max_img = np.zeros((H, W), np.float32)
-    with MovieWriter(ws.path(MC_FILE), (T, H, W)) as out:
+    with MovieWriter(ws.path(MC_FILE), (T, H, W), MOVIE_DTYPE) as out:
         for t in range(T):
             if should_stop():
                 raise InterruptedError("已取消")
-            raw = np.asarray(movie[t])
+            raw = np.asarray(movie[t], dtype=np.float32)
             f = bandpass(raw, p.filter_sigma, p.bg_sigma)
             dx, dy, _ = reg.shift(template, f)
             if p.piecewise:
@@ -212,8 +212,7 @@ def run_motion_correction(session, ws: Workspace, p: MotionParams,
             if t % 10 == 0:  # quality on a subsample: cheap and enough for a plot
                 q_before[t] = _ncc(template, f)
                 q_after[t] = _ncc(template, fc)
-            frame8 = np.clip(np.rint(corrected), 0, 255).astype(np.uint8)
-            out.write(frame8[None])
+            out.write(corrected[None].astype(MOVIE_DTYPE))
             sum_img += corrected
             np.maximum(max_img, corrected, out=max_img)
             if t % 100 == 0 or t == T - 1:

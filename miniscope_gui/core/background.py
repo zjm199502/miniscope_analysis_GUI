@@ -16,6 +16,7 @@ from typing import Callable
 import cv2
 import numpy as np
 
+from .preprocess import MOVIE_DTYPE
 from .storage import MovieWriter
 from .workspace import Workspace
 
@@ -34,9 +35,10 @@ def disk(radius: int) -> np.ndarray:
 
 
 def remove_background(frame: np.ndarray, p: BackgroundParams, kernel=None) -> np.ndarray:
-    f = frame
+    """Float32 in, float32 out (no rounding: cell signals are only a few counts)."""
+    f = np.asarray(frame, np.float32)
     if p.median_ksize > 1:
-        f = cv2.medianBlur(f, int(p.median_ksize) | 1)
+        f = cv2.medianBlur(f, min(5, int(p.median_ksize) | 1))  # float32 supports 3 and 5
     if kernel is None:
         kernel = disk(max(1, int(p.cell_diameter)))
     return cv2.morphologyEx(f, cv2.MORPH_TOPHAT, kernel)
@@ -58,19 +60,19 @@ def run_background(session, ws: Workspace, p: BackgroundParams,
     movie = source_movie(ws, p.source)
     T, H, W = movie.shape
     kernel = disk(max(1, int(p.cell_diameter)))
-    max_img = np.zeros((H, W), np.uint8)
+    max_img = np.zeros((H, W), np.float32)
     sum_img = np.zeros((H, W), np.float64)
-    with MovieWriter(ws.path(BG_FILE), (T, H, W)) as out:
+    with MovieWriter(ws.path(BG_FILE), (T, H, W), MOVIE_DTYPE) as out:
         for t in range(T):
             if should_stop():
                 raise InterruptedError("已取消")
             f = remove_background(np.asarray(movie[t]), p, kernel)
-            out.write(f[None])
+            out.write(f[None].astype(MOVIE_DTYPE))
             np.maximum(max_img, f, out=max_img)
             sum_img += f
             if t % 200 == 0 or t == T - 1:
                 progress((t + 1) / T, f"去除背景 {t + 1}/{T} 帧")
-    np.save(ws.path("bg_max.npy"), max_img.astype(np.float32))
+    np.save(ws.path("bg_max.npy"), max_img)
     np.save(ws.path("bg_mean.npy"), (sum_img / T).astype(np.float32))
     ws.record_step("background", asdict(p), {"movie": BG_FILE})
     progress(1.0, "去除背景完成")

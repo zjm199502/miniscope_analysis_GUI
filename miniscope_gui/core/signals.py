@@ -50,7 +50,7 @@ class SignalParams:
     tau_s: float | None = None        # overrides the indicator value
     baseline_window_s: float = 60.0
     baseline_percentile: float = 10.0
-    spike_threshold: float = 2.5      # s_min in units of noise std
+    spike_threshold: float = 3.0      # s_min in units of noise std
 
 
 @njit(cache=True)
@@ -120,11 +120,21 @@ def compute_signals(raw, F_local, fps, p: SignalParams):
         x = x - running_percentile(x, win, 20.0 if p.baseline_percentile < 20 else p.baseline_percentile)
         dff[k] = x
         sn = noise_std(x)
+        if sn <= 0:   # degenerate (e.g. constant) trace: fall back to plain std
+            sn = float(np.std(x)) or 1e-6
         noise[k] = sn
         c, s = oasis_ar1(x, g, p.spike_threshold * sn)
         denoised[k] = c
         spikes[k] = s
     return dict(dff=dff, denoised=denoised, spikes=spikes, noise=noise, g=g, tau=tau)
+
+
+def event_counts(spikes: np.ndarray) -> np.ndarray:
+    """Number of events per cell: runs of consecutive non-zero spike frames count once."""
+    on = spikes > 0
+    starts = on.copy()
+    starts[:, 1:] &= ~on[:, :-1]
+    return starts.sum(1)
 
 
 def run_signals(session, ws: Workspace, p: SignalParams,

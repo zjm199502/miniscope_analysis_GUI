@@ -24,7 +24,7 @@ def test_rigid_recovers_shifts(tmp_path):
     assert np.abs(err).mean() < 0.3, np.abs(err).mean()
     assert summ["corr_after"] > summ["corr_before"]
     mc = load_mc_movie(ws)
-    assert mc.shape == movie.shape and mc.dtype == np.uint8
+    assert mc.shape == movie.shape and mc.dtype == np.float16
 
 
 def test_piecewise_runs(tmp_path):
