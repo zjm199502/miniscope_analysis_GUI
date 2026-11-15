@@ -14,15 +14,16 @@ from .pages.calcium_pages import BackgroundPage, ExtractionPage, MotionPage, Sig
 from .pages.common import FitScrollArea
 from .pages.import_page import ImportPage
 from .pages.behavior_pages import BehaviorPage, SyncPage
+from .pages.modeling_page import ModelingPage
 from .pages.preprocess_page import PreprocessPage
 from .video_view import VideoView
 from .worker import start_worker
 
 STEP_NAMES = ["导入数据", "预处理", "运动校正", "去除背景", "细胞提取", "信号与 spike",
-              "行为分析", "同步分析"]
+              "行为分析", "同步分析", "建模分析"]
 # step index -> workspace steps that must exist before it can be opened
 REQUIRES = {1: [], 2: ["preprocess"], 3: ["preprocess"], 4: ["background"],
-            5: ["extraction"], 6: [], 7: ["behavior"]}
+            5: ["extraction"], 6: [], 7: ["behavior"], 8: ["signals"]}
 
 
 class MainWindow(QMainWindow):
@@ -117,7 +118,13 @@ class MainWindow(QMainWindow):
     def _make_extra_pages(self):
         self.beh_page = BehaviorPage(self)
         self.sync_page = SyncPage(self)
-        return [self.beh_page, self.sync_page]
+        self.model_page = ModelingPage(self)
+        return [self.beh_page, self.sync_page, self.model_page]
+
+    def refit_page(self):
+        """Re-fit the right panel after a page changed its own height."""
+        if hasattr(self, "pages"):
+            self._fit_page_height(self.pages.currentIndex())
 
     def _fit_page_height(self, _):
         # QStackedWidget sizes to its largest page; let only the current one count
@@ -157,6 +164,10 @@ class MainWindow(QMainWindow):
         self.pages.setCurrentIndex(row)
         page = self.pages.widget(row)
         self._joint = None
+        self._clear_model_view()
+        if page is self.model_page:
+            self.model_page.on_context()
+            self.model_page.update_status()
         if page is not self.beh_page and getattr(self.beh_page, "edit_roi", None) is not None:
             self.beh_page.cancel_edit()
         if page in (self.beh_page, self.sync_page) and self.beh_page.video is not None:
@@ -206,6 +217,9 @@ class MainWindow(QMainWindow):
             p.update_status()
         if page is self.beh_page:
             self.sync_page.on_context()
+        if page is self.model_page:
+            self.model_page.update_status()
+            self.refit_page()
         self.statusBar().showMessage(f"{page.title} 完成")
         key = page.default_view()
         if key:
@@ -260,6 +274,14 @@ class MainWindow(QMainWindow):
         if which != "cells" and self.review.active:
             self.review.close()
         self._joint = None
+        self._clear_model_view()
+        from .model_views import is_model_view, show as show_model
+        if is_model_view(which):
+            try:
+                show_model(self, which)
+            except ValueError as e:
+                QMessageBox.information(self, "提示", str(e))
+            return
         if which.startswith("beh_"):
             self.beh_page.show_view(which)
             return
@@ -328,6 +350,12 @@ class MainWindow(QMainWindow):
         elif which == "traces":
             if self._need("signals", "信号与 spike"):
                 self._show_heatmap()
+
+    def _clear_model_view(self):
+        if getattr(self, "model_overlays", False):
+            self.view.clear_overlays()
+            self.trace.getAxis("bottom").setTicks(None)     # model plots use named ticks
+            self.model_overlays = False
 
     def _show_heatmap(self):
         from ..core.signals import load_signals
