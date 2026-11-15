@@ -8,6 +8,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from fake_data import make_fake_v4
@@ -111,4 +112,74 @@ def test_gui_flow(tmp_path, app):
     sp.pre.setValue(1); sp.post.setValue(2)
     for kind in ("freezing", "speed", "peth"):
         w.joint_analysis(kind)
+    w.close()
+
+
+def test_modeling_page(tmp_path, app):
+    """Step 9: run every modelling analysis through the GUI and open every result view."""
+    from miniscope_gui.core.modeling.report import ANALYSES, VIEWS
+    from miniscope_gui.gui.main_window import MainWindow
+    from test_modeling import make_workspace
+    make_fake_v4(tmp_path / "My_V4_Miniscope", n_frames=60, frames_per_file=60, size=(64, 64))
+    make_workspace(tmp_path / "out", T=2400)
+    w = MainWindow()
+    w.show()
+    w.import_page.load_source(str(tmp_path / "My_V4_Miniscope"))
+    w.import_page.set_output(str(tmp_path / "out"))
+    assert w.ws.step("signals") and w.steps.item(8).flags() & Qt.ItemIsEnabled
+    w.steps.setCurrentRow(8)
+    mp = w.model_page
+    assert "区域 left" in [mp.dec_target.itemText(i) for i in range(mp.dec_target.count())]
+    mp.glm_events.setText("60, 150")
+    mp.glm_shuf.setValue(20); mp.dec_shuf.setValue(20); mp.info_shuf.setValue(50)
+    mp.emb_steps.setValue(200); mp.hmm_cmp.setChecked(True)
+    for i, key in enumerate(ANALYSES):
+        mp.kind.setCurrentIndex(i)
+        assert mp.key == key and not mp.view_buttons[0].isEnabled()
+        assert mp.forms[key].isVisibleTo(mp) and sum(f.isVisibleTo(mp) for f in mp.forms.values()) == 1
+        mp._run(); _wait(app, w)
+        assert w.ws.step(f"model_{key}"), key
+        assert mp.result_lbl.text() and mp.view_buttons[0].isEnabled()
+        for j, (view, _) in enumerate(VIEWS[key]):
+            mp._show(j)
+            assert w.view.title.text()
+    # results survive switching analyses and steps; other views are not left with model overlays
+    mp.kind.setCurrentIndex(0)
+    assert "R²" in mp.result_lbl.text()
+    w.show_result("net_graph")
+    assert w.model_overlays and len(w.view._overlays) == 2
+    w.steps.setCurrentRow(5)
+    assert not w.view._overlays
+    w.show_result("traces")
+    w.close()
+
+
+def test_modeling_page_without_behavior(tmp_path, app, monkeypatch):
+    from miniscope_gui.gui.main_window import MainWindow
+    from test_modeling import make_workspace
+    make_fake_v4(tmp_path / "My_V4_Miniscope", n_frames=60, frames_per_file=60, size=(64, 64))
+    make_workspace(tmp_path / "out", T=1500, behavior=False)
+    w = MainWindow()
+    w.import_page.load_source(str(tmp_path / "My_V4_Miniscope"))
+    w.import_page.set_output(str(tmp_path / "out"))
+    w.steps.setCurrentRow(8)
+    mp = w.model_page
+    said = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: said.append(a[2]))
+    mp.kind.setCurrentIndex(1)                      # decoder needs behaviour
+    assert "需要行为数据" in mp.need.text()
+    mp._run()
+    assert w.thread is None and said and "行为" in said[-1]
+    for key in ("ensembles", "hmm", "network"):     # these do not
+        mp.kind.setCurrentIndex(mp.keys.index(key))
+        mp._run(); _wait(app, w)
+        assert w.ws.step(f"model_{key}"), key
+        for j in range(3):
+            mp._show(j)
+    mp.kind.setCurrentIndex(mp.keys.index("embedding"))
+    mp.emb_steps.setValue(200)
+    mp.emb_mode.setCurrentIndex(1)
+    mp._run(); _wait(app, w)
+    assert w.ws.step("model_embedding")
+    mp._show(0); mp._show(1)
     w.close()
