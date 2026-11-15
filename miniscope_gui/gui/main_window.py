@@ -16,14 +16,15 @@ from .pages.import_page import ImportPage
 from .pages.behavior_pages import BehaviorPage, SyncPage
 from .pages.modeling_page import ModelingPage
 from .pages.preprocess_page import PreprocessPage
+from .pages.registration_page import RegistrationPage
 from .video_view import VideoView
 from .worker import start_worker
 
 STEP_NAMES = ["导入数据", "预处理", "运动校正", "去除背景", "细胞提取", "信号与 spike",
-              "行为分析", "同步分析", "建模分析"]
+              "行为分析", "同步分析", "建模分析", "跨天配准"]
 # step index -> workspace steps that must exist before it can be opened
 REQUIRES = {1: [], 2: ["preprocess"], 3: ["preprocess"], 4: ["background"],
-            5: ["extraction"], 6: [], 7: ["behavior"], 8: ["signals"]}
+            5: ["extraction"], 6: [], 7: ["behavior"], 8: ["signals"], 9: []}
 
 
 class MainWindow(QMainWindow):
@@ -119,7 +120,8 @@ class MainWindow(QMainWindow):
         self.beh_page = BehaviorPage(self)
         self.sync_page = SyncPage(self)
         self.model_page = ModelingPage(self)
-        return [self.beh_page, self.sync_page, self.model_page]
+        self.reg_page = RegistrationPage(self)
+        return [self.beh_page, self.sync_page, self.model_page, self.reg_page]
 
     def refit_page(self):
         """Re-fit the right panel after a page changed its own height."""
@@ -217,8 +219,8 @@ class MainWindow(QMainWindow):
             p.update_status()
         if page is self.beh_page:
             self.sync_page.on_context()
-        if page is self.model_page:
-            self.model_page.update_status()
+        if page in (self.model_page, self.reg_page):
+            page.update_status()
             self.refit_page()
         self.statusBar().showMessage(f"{page.title} 完成")
         key = page.default_view()
@@ -276,6 +278,13 @@ class MainWindow(QMainWindow):
         self._joint = None
         self._clear_model_view()
         from .model_views import is_model_view, show as show_model
+        from .registration_views import is_reg_view
+        if is_reg_view(which):
+            try:
+                self.reg_page.show_view(which)
+            except (ValueError, FileNotFoundError) as e:
+                QMessageBox.information(self, "提示", str(e))
+            return
         if is_model_view(which):
             try:
                 show_model(self, which)
