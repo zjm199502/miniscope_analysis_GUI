@@ -2,7 +2,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QFormLayout,
-                               QHBoxLayout, QLabel, QPushButton, QSpinBox,
+                               QGridLayout, QLabel, QPushButton, QSpinBox,
                                QVBoxLayout, QWidget)
 
 from ...core.preprocess import PreprocessParams, output_shape, run_preprocess
@@ -31,10 +31,12 @@ class PreprocessPage(QWidget):
         form.addRow("结束时间", self.end)
         form.addRow(hint("例如去掉开头动物刚放进去的几秒。"))
 
-        self.crop_cb = QCheckBox("在画面上框选分析区域")
+        self.crop_cb = QCheckBox("在画面上圈出视野范围")
         self.crop_cb.toggled.connect(self._toggle_roi)
         form.addRow(self.crop_cb)
-        form.addRow(hint("拖动画面上的黄色方框，只保留镜头视野内有细胞的区域。"))
+        form.addRow(hint("拖动黄色圆圈移动位置，拖动圆圈上的小方块调整大小，"
+                         "让圆圈刚好盖住镜头视野内有细胞的区域。"
+                         "圆圈外的像素在后续步骤中会被忽略。"))
 
         self.sbin = QSpinBox(); self.sbin.setRange(1, 4); self.sbin.setValue(2)
         form.addRow("空间降采样", self.sbin)
@@ -53,16 +55,20 @@ class PreprocessPage(QWidget):
             w.valueChanged.connect(self._update_estimate)
 
         self.run_btn = QPushButton("开始预处理")
-        self.run_btn.setStyleSheet("font-weight:bold; padding:6px;")
+        self.run_btn.setStyleSheet(
+            "QPushButton{font-weight:bold; padding:8px; color:white; background:#2b6cb0;"
+            " border:none; border-radius:4px;}"
+            "QPushButton:disabled{background:#a0aec0;}")
         self.run_btn.clicked.connect(self._run)
         lay.addWidget(self.run_btn)
 
         lay.addWidget(heading("查看结果"))
-        row = QHBoxLayout()
-        for key, txt in (("movie", "预处理视频"), ("mean", "平均投影"), ("max", "最大投影")):
+        row = QGridLayout()
+        for i, (key, txt) in enumerate((("movie", "预处理视频"), ("mean", "平均投影"),
+                                        ("max", "最大投影"), ("raw", "原始视频"))):
             b = QPushButton(txt)
             b.clicked.connect(lambda _=False, k=key: self.showResult.emit(k))
-            row.addWidget(b)
+            row.addWidget(b, i // 2, i % 2)
         lay.addLayout(row)
         lay.addWidget(hint("最大投影上亮的小圆点通常就是活跃的细胞，可以用来判断视野和焦距是否合适。"))
         lay.addStretch(1)
@@ -77,30 +83,31 @@ class PreprocessPage(QWidget):
         self.end.setValue(dur)
         if self.crop_cb.isChecked():
             self.crop_cb.setChecked(False)
+        if self.roi is not None:
+            self.roi = None   # new session: start again with a centred circle
         self.setEnabled(True)
         self._update_estimate()
 
     def params(self) -> PreprocessParams:
-        crop = None
+        circle = None
         if self.roi is not None and self.crop_cb.isChecked():
-            x, y = (int(round(v)) for v in self.roi.pos())
-            w, h = (int(round(v)) for v in self.roi.size())
-            x, y = max(0, x), max(0, y)
-            w = min(w, self.session.width - x)
-            h = min(h, self.session.height - y)
-            crop = (x, y, w, h)
+            d = float(self.roi.size()[0])
+            x, y = (float(v) for v in self.roi.pos())
+            circle = (x + d / 2, y + d / 2, d / 2)
         end = self.end.value()
         return PreprocessParams(
             start_s=self.start.value(),
-            end_s=None if end >= self.session.duration_s - 1e-6 else end,
-            crop=crop, spatial_bin=self.sbin.value(), temporal_bin=self.tbin.value())
+            end_s=None if end >= self.session.duration_s - 0.051 else end,  # spinbox rounds to 0.1 s
+            fov_circle=circle, spatial_bin=self.sbin.value(), temporal_bin=self.tbin.value())
 
     def _toggle_roi(self, on):
         if on and self.session is not None:
             w, h = self.session.width, self.session.height
             if self.roi is None:
-                self.roi = pg.RectROI([w * 0.1, h * 0.1], [w * 0.8, h * 0.8],
-                                      pen=pg.mkPen("y", width=2), maxBounds=pg.QtCore.QRectF(0, 0, w, h))
+                r = 0.45 * min(w, h)
+                self.roi = pg.CircleROI([w / 2 - r, h / 2 - r], radius=r,
+                                        pen=pg.mkPen("y", width=2),
+                                        handlePen=pg.mkPen("y", width=2))
                 self.roi.sigRegionChanged.connect(self._update_estimate)
             self.view.vb.addItem(self.roi)
         elif self.roi is not None:
@@ -116,7 +123,7 @@ class PreprocessPage(QWidget):
         n = int(round(max(0, dur) * self.session.fps)) // p.temporal_bin
         gb = n * H * W / 1e9
         self.estimate.setText(f"输出: {W}×{H} 像素，{n} 帧，"
-                              f"{self.session.fps / p.temporal_bin:g} Hz，约 {gb:.2f} GB 硬盘空间")
+                              f"{self.session.fps / p.temporal_bin:.2f} Hz，约 {gb:.2f} GB 硬盘空间")
 
     def _run(self):
         if self.session is not None:

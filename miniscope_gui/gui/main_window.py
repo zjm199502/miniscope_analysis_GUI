@@ -4,10 +4,11 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QListWidget, QListWidgetItem, QMainWindow,
                                QMessageBox, QProgressBar, QPushButton,
-                               QScrollArea, QSplitter, QStackedWidget)
+                               QSplitter, QStackedWidget)
 
 from .. import __version__
 from ..core.preprocess import MAX_FILE, MEAN_FILE, load_movie
+from .pages.common import FitScrollArea
 from .pages.import_page import ImportPage
 from .pages.placeholder import PlaceholderPage
 from .pages.preprocess_page import PreprocessPage
@@ -53,16 +54,17 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.pre_page)
         for name, text in STEPS[2:]:
             self.pages.addWidget(PlaceholderPage(name, text))
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
+        scroll = FitScrollArea()
         scroll.setWidget(self.pages)
-        scroll.setMinimumWidth(340)
+        scroll.setMinimumWidth(320)
 
         split = QSplitter()
         split.addWidget(self.steps)
         split.addWidget(self.view)
         split.addWidget(scroll)
         split.setStretchFactor(1, 1)
+        split.setCollapsible(2, False)
+        split.setSizes([150, 850, 400])
         self.setCentralWidget(split)
 
         self.progress = QProgressBar()
@@ -133,8 +135,12 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ results
     def _show_pre_result(self, which):
-        if self.ws is None or not self.ws.step("preprocess"):
+        if which != "raw" and (self.ws is None or not self.ws.step("preprocess")):
             QMessageBox.information(self, "提示", "请先运行预处理")
+            return
+        if which == "raw":
+            s = self.session
+            self.view.set_movie(s.get_frame, s.n_frames, s.fps, f"原始视频 · {s.folder.name}")
             return
         if which == "movie":
             mov = load_movie(self.ws)
