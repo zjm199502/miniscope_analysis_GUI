@@ -19,6 +19,7 @@ MOVIE_FILE = "movie_pre.npy"
 TIMES_FILE = "frame_times_pre.npy"
 MEAN_FILE = "mean_projection.npy"
 MAX_FILE = "max_projection.npy"
+MASK_FILE = "fov_mask.npy"
 
 
 @dataclass
@@ -26,6 +27,10 @@ class PreprocessParams:
     start_s: float = 0.0
     end_s: float | None = None          # None = until the end
     crop: tuple[int, int, int, int] | None = None   # x, y, w, h in raw pixels
+    # circular field of view (cx, cy, r) in raw pixels. Sets the crop to the
+    # circle's bounding box and saves a mask; pixels are kept, later steps
+    # ignore what lies outside the mask.
+    fov_circle: tuple[float, float, float] | None = None
     spatial_bin: int = 2                # 2 = average 2x2 pixels
     temporal_bin: int = 1               # 3 = average every 3 frames (30 -> 10 Hz)
     chunk_frames: int = 200
@@ -41,7 +46,35 @@ def bin_spatial(block: np.ndarray, b: int) -> np.ndarray:
     return v.reshape(t, h2, b, w2, b).mean(axis=(2, 4))
 
 
+def circle_to_crop(session: MiniscopeSession, cx: float, cy: float, r: float):
+    x0 = max(0, int(np.floor(cx - r)))
+    y0 = max(0, int(np.floor(cy - r)))
+    x1 = min(session.width, int(np.ceil(cx + r)))
+    y1 = min(session.height, int(np.ceil(cy + r)))
+    return x0, y0, max(1, x1 - x0), max(1, y1 - y0)
+
+
+def fov_mask(p: PreprocessParams, H: int, W: int) -> np.ndarray:
+    """Boolean mask (H, W) in output pixels; all True without a circle."""
+    if not p.fov_circle:
+        return np.ones((H, W), bool)
+    cx, cy, r = p.fov_circle
+    x0, y0 = (p.crop[0], p.crop[1]) if p.crop else (0, 0)
+    b = max(1, p.spatial_bin)
+    yy, xx = np.mgrid[:H, :W]
+    px = x0 + (xx + 0.5) * b  # output pixel centre in raw coordinates
+    py = y0 + (yy + 0.5) * b
+    return (px - cx) ** 2 + (py - cy) ** 2 <= r ** 2
+
+
+def resolve_crop(session: MiniscopeSession, p: PreprocessParams) -> PreprocessParams:
+    if p.fov_circle and not p.crop:
+        p.crop = circle_to_crop(session, *p.fov_circle)
+    return p
+
+
 def output_shape(session: MiniscopeSession, p: PreprocessParams):
+    p = resolve_crop(session, p)
     x, y, w, h = p.crop if p.crop else (0, 0, session.width, session.height)
     b = max(1, p.spatial_bin)
     return h // b, w // b
@@ -62,6 +95,7 @@ def run_preprocess(session: MiniscopeSession, ws: Workspace, p: PreprocessParams
     progress = progress or (lambda f, m: None)
     should_stop = should_stop or (lambda: False)
 
+    p = resolve_crop(session, p)
     start, stop = frame_range(session, p)
     tb = max(1, p.temporal_bin)
     n_in = stop - start
@@ -115,12 +149,13 @@ def run_preprocess(session: MiniscopeSession, ws: Workspace, p: PreprocessParams
     np.save(ws.path(TIMES_FILE), times)
     np.save(ws.path(MEAN_FILE), (sum_img / max(out_i, 1)).astype(np.float32))
     np.save(ws.path(MAX_FILE), max_img)
+    np.save(ws.path(MASK_FILE), fov_mask(p, H, W))
 
     params = asdict(p)
     params["frame_range"] = [start, stop]
     params["fps_out"] = session.fps / tb
     outputs = {"movie": MOVIE_FILE, "times": TIMES_FILE, "mean": MEAN_FILE,
-               "max": MAX_FILE, "shape": [out_i, H, W]}
+               "max": MAX_FILE, "mask": MASK_FILE, "shape": [out_i, H, W]}
     ws.record_step("preprocess", params, outputs)
     progress(1.0, "预处理完成")
     return outputs

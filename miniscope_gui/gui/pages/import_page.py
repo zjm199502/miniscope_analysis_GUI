@@ -2,7 +2,8 @@ from pathlib import Path
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (QFileDialog, QLabel, QLineEdit, QMessageBox,
-                               QPushButton, QVBoxLayout, QWidget)
+                               QPushButton, QSizePolicy, QVBoxLayout,
+                               QWidget)
 
 from ...core.workspace import Workspace, WorkspaceError
 from ...io.ucla_v4 import MiniscopeSession
@@ -29,6 +30,7 @@ class ImportPage(QWidget):
 
         self.info = QLabel("")
         self.info.setWordWrap(True)
+        self.info.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.info.setStyleSheet("background:#f4f4f4; padding:6px; border-radius:4px;")
         lay.addWidget(self.info)
 
