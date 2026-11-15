@@ -136,18 +136,25 @@ class MiniscopeSession:
         return int(sum(self.frames_per_file))
 
     @property
+    def nominal_fps(self) -> float | None:
+        return _parse_fps(self.metadata.get("frameRate"))
+
+    @property
     def fps(self) -> float:
-        meta_fps = _parse_fps(self.metadata.get("frameRate"))
-        if meta_fps:
-            return meta_fps
+        """Real average frame rate.
+
+        V4 hardware rarely hits the nominal rate exactly (e.g. "30FPS" is
+        really ~29.8 Hz), so timestamps win when they match the frame count.
+        """
         rep = self.timestamp_report()
-        if rep is not None and rep.measured_fps > 0:
+        if rep is not None and rep.measured_fps > 0 and rep.n_timestamps == self.n_frames:
             return rep.measured_fps
-        return 30.0
+        return self.nominal_fps or 30.0
 
     @property
     def duration_s(self) -> float:
-        return self.n_frames / self.fps
+        t = self.frame_times_s()
+        return float(t[-1] + 1.0 / self.fps) if len(t) else 0.0
 
     def frame_times_s(self) -> np.ndarray:
         """Time of each frame in seconds from the first frame.
@@ -177,9 +184,11 @@ class MiniscopeSession:
         gaps = d > 1.5 * med
         missing = int(np.sum(np.round(d[gaps] / med) - 1)) if gaps.any() else 0
         dur = float(ts[-1] - ts[1]) / 1000.0
+        # mean interval (not median): intervals jitter between e.g. 33 and 34 ms
+        mean_fps = (len(ts) - 2) / dur if dur > 0 else 1000.0 / med
         return TimestampReport(
             n_timestamps=len(ts), duration_s=dur,
-            measured_fps=1000.0 / med, median_interval_ms=med,
+            measured_fps=mean_fps, median_interval_ms=med,
             n_dropped_gaps=int(gaps.sum()), estimated_missing_frames=missing)
 
     def summary_zh(self) -> str:
@@ -187,7 +196,8 @@ class MiniscopeSession:
             f"文件夹: {self.folder}",
             f"视频文件: {len(self.video_files)} 个，共 {self.n_frames} 帧",
             f"画面大小: {self.width} × {self.height} 像素",
-            f"帧率: {self.fps:g} Hz，时长约 {self.duration_s / 60:.1f} 分钟",
+            f"帧率: {self.fps:.2f} Hz（设定值 {self.nominal_fps or '未知'}），"
+            f"时长约 {self.duration_s / 60:.1f} 分钟",
         ]
         for key, label in (("gain", "增益"), ("led0", "LED 强度"), ("ewl", "焦距 (EWL)")):
             if key in self.metadata:
