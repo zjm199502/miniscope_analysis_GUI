@@ -53,6 +53,7 @@ def test_gui_flow(tmp_path, app):
         w.show_result(key)
 
     w.steps.setCurrentRow(3)
+    w.bg_page._estimate()          # fake data has only 3 cells: must fail gracefully
     w.bg_page.diam.setValue(8)
     w.bg_page._run(); _wait(app, w)
     assert w.ws.step("background")

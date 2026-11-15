@@ -40,7 +40,7 @@ PNR_FILE = "summary_pnr.npy"
 
 @dataclass
 class ExtractionParams:
-    cell_diameter: int = 10       # pixels in the processed movie
+    cell_diameter: int = 8       # pixels in the processed movie
     min_corr: float = 0.8
     min_pnr: float = 8.0
     max_cells: int = 1000
@@ -147,6 +147,9 @@ def summary_images(movie, sigma: float, chunk: int, progress, should_stop, mask=
 
 
 # ------------------------------------------------------------------ 2. seeds
+SEED_WIN = 0.3
+SEED_SEP = 0.4
+
 def find_seeds(cn, pnr, p: ExtractionParams, mask=None):
     score = cn * pnr
     ok = (cn >= p.min_corr) & (pnr >= p.min_pnr)
@@ -154,12 +157,12 @@ def find_seeds(cn, pnr, p: ExtractionParams, mask=None):
         # no seeds within ~0.75 cell diameter of the field-of-view edge (vignetted tissue)
         r_edge = max(1, int(round(0.75 * p.cell_diameter)))
         ok &= ndimage.binary_erosion(mask, structure=np.ones((3, 3), bool), iterations=r_edge)
-    r = max(1, int(round(p.cell_diameter * 0.5)))
+    r = max(1, int(round(p.cell_diameter * SEED_WIN)))
     local_max = score == ndimage.maximum_filter(score, size=2 * r + 1)
     cand = np.argwhere(ok & local_max)
     order = np.argsort(-score[cand[:, 0], cand[:, 1]])
     seeds = []
-    min_d2 = (0.6 * p.cell_diameter) ** 2
+    min_d2 = (SEED_SEP * p.cell_diameter) ** 2
     for y, x in cand[order]:
         if all((y - sy) ** 2 + (x - sx) ** 2 >= min_d2 for sy, sx in seeds):
             seeds.append((int(y), int(x)))
@@ -476,6 +479,14 @@ def suspect_cells(A, shape, diameter) -> np.ndarray:
         ev = np.sort(np.linalg.eigvalsh(cov))
         if ev[0] > 0 and np.sqrt(ev[1] / ev[0]) > 3:
             out[k] = True
+    # pieces of a flagged object: cells whose footprint touches a flagged one
+    big = np.flatnonzero(out)
+    if len(big):
+        Ab = (A > 0).astype(np.float32)
+        img_big = np.asarray(Ab[:, big].sum(1)).reshape(H, W) > 0
+        near = ndimage.binary_dilation(img_big, iterations=1).ravel().astype(np.float32)
+        touch = np.asarray(Ab.T @ near).ravel() > 0
+        out |= touch
     return out
 
 

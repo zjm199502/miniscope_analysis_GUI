@@ -23,4 +23,6 @@ def main():
     app.setFont(f)
     w = MainWindow()
     w.show()
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(3000, w.updates.maybe_check_on_start)
     sys.exit(app.exec())
