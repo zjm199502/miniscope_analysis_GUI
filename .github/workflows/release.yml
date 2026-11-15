@@ -105,11 +105,18 @@ jobs:
             --collect-submodules pyqtgraph --collect-data pyqtgraph \
             --exclude-module numba --exclude-module llvmlite --exclude-module matplotlib \
             --exclude-module tkinter packaging/launcher.py
-      - name: Zip (for updates) and dmg (for first install)
-        run: |
-          ditto -c -k --keepParent dist/MiniscopeAnalysis.app MiniscopeAnalysis-macOS-arm64.zip
-          mkdir -p dmg && cp -R dist/MiniscopeAnalysis.app dmg/ && ln -s /Applications dmg/Applications
-          hdiutil create -volname MiniscopeAnalysis -srcfolder dmg -ov -format UDZO MiniscopeAnalysis-macOS-arm64.dmg
+      - name: Sign, (optionally) notarize, zip and dmg
+        # ad-hoc signature without secrets; Developer ID + notarization once they are added
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash packaging/macos_sign.sh dist/MiniscopeAnalysis.app MiniscopeAnalysis-macOS-arm64
       - uses: actions/upload-artifact@v4
         with:
           name: macos
