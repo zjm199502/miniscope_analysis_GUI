@@ -57,6 +57,7 @@ class VideoView(QWidget):
 
     # ----------------------------------------------------------------- API
     def _reset_look(self):
+        self.img.resetTransform()
         self.vb.setAspectLocked(True)
         self.hist.gradient.loadPreset("grey")
 

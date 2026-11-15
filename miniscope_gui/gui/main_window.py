@@ -13,7 +13,7 @@ from .cell_review import CellReview
 from .pages.calcium_pages import BackgroundPage, ExtractionPage, MotionPage, SignalsPage
 from .pages.common import FitScrollArea
 from .pages.import_page import ImportPage
-from .pages.placeholder import PlaceholderPage
+from .pages.behavior_pages import BehaviorPage, SyncPage
 from .pages.preprocess_page import PreprocessPage
 from .video_view import VideoView
 from .worker import start_worker
@@ -22,7 +22,7 @@ STEP_NAMES = ["导入数据", "预处理", "运动校正", "去除背景", "细�
               "行为分析", "同步分析"]
 # step index -> workspace steps that must exist before it can be opened
 REQUIRES = {1: [], 2: ["preprocess"], 3: ["preprocess"], 4: ["background"],
-            5: ["extraction"], 6: [], 7: []}
+            5: ["extraction"], 6: [], 7: ["behavior"]}
 
 
 class MainWindow(QMainWindow):
@@ -102,17 +102,20 @@ class MainWindow(QMainWindow):
         self.import_page.sessionReady.connect(self._on_session)
         self.pre_page.runRequested.connect(lambda fn, p: self._run_step(self.pre_page, fn, p))
         self.pre_page.showResult.connect(self.show_result)
-        for page in self.step_pages:
+        for page in self.step_pages + self.extra_pages:
             page.runRequested.connect(lambda fn, p, pg_=page: self._run_step(pg_, fn, p))
             page.showRequested.connect(self.show_result)
+        self.view.frameChanged.connect(self._on_frame)
+        self._joint = None
         self.ext_page.toggle_btn.clicked.connect(self._toggle_cells)
         self.ext_page.merge_btn.clicked.connect(self._merge_cells)
         self.ext_page.prev_btn.clicked.connect(lambda: self.review.step(-1))
         self.ext_page.next_btn.clicked.connect(lambda: self.review.step(1))
 
     def _make_extra_pages(self):
-        return [PlaceholderPage("7. 行为分析", "导入行为视频，追踪动物位置，划定区域并计算行为指标。"),
-                PlaceholderPage("8. 同步分析", "把钙信号和行为在时间上对齐，做联合分析。")]
+        self.beh_page = BehaviorPage(self)
+        self.sync_page = SyncPage(self)
+        return [self.beh_page, self.sync_page]
 
     def _fit_page_height(self, _):
         # QStackedWidget sizes to its largest page; let only the current one count
@@ -151,6 +154,11 @@ class MainWindow(QMainWindow):
     def _on_step_changed(self, row):
         self.pages.setCurrentIndex(row)
         page = self.pages.widget(row)
+        self._joint = None
+        if page is not self.beh_page and getattr(self.beh_page, "edit_roi", None) is not None:
+            self.beh_page.cancel_edit()
+        if page in (self.beh_page, self.sync_page) and self.beh_page.video is not None:
+            self.beh_page.show_video()
         if self.review.active and page is not self.ext_page and page is not self.sig_page:
             self.review.close()
             self.trace.hide()
@@ -192,8 +200,10 @@ class MainWindow(QMainWindow):
             return
         page.update_status()
         page.on_finished(result)
-        for p in self.step_pages:
+        for p in self.step_pages + self.extra_pages:
             p.update_status()
+        if page is self.beh_page:
+            self.sync_page.on_context()
         self.statusBar().showMessage(f"{page.title} 完成")
         key = page.default_view()
         if key:
@@ -234,6 +244,16 @@ class MainWindow(QMainWindow):
         """Show a result in the centre viewer (and the trace panel when useful)."""
         if which != "cells" and self.review.active:
             self.review.close()
+        self._joint = None
+        if which.startswith("beh_"):
+            self.beh_page.show_view(which)
+            return
+        if which == "sync_joint":
+            self._show_joint()
+            return
+        if which == "sync_qc":
+            self._show_sync_qc()
+            return
         if which not in ("cells", "traces", "mc_shifts"):
             self.trace.hide()
         if which == "raw":
@@ -341,6 +361,168 @@ class MainWindow(QMainWindow):
         self.review.selected = [k]
         self.review.reload()
         self.ext_page.review_info.setText(self.review.summary())
+
+    # -------------------------------------------------------- sync / joint
+    def _on_frame(self, i):
+        if self._joint is None:
+            return
+        tb = self._joint["tb"]
+        if 0 <= i < len(tb):
+            self._joint["line"].setValue(tb[i])
+            tr = self._joint.get("track")
+            if tr is not None and i < len(tr["x"]):
+                self._joint["dot"].setData([tr["x"][i]], [tr["y"][i]])
+
+    def _show_joint(self):
+        from ..core.behavior import analyze, load_track
+        from ..core.extraction import load_cells
+        from ..core.signals import load_signals
+        from ..core.sync import load_sync
+        if not self._need("sync", "同步") or self.beh_page.video is None:
+            if self.beh_page.video is None:
+                QMessageBox.information(self, "提示", "请先在第 7 步导入行为视频")
+            return
+        tb = load_sync(self.ws)
+        self.beh_page.show_video()
+        self.view.title.setText("联合播放：拖动滑块或播放，下方竖线 = 当前时刻")
+        tr = self.trace
+        tr.clear()
+        tr.addLegend()
+        if self.ws.step("signals"):
+            sig = load_signals(self.ws)
+            acc = load_cells(self.ws)["accepted"].astype(bool)
+            tr.plot(sig["times"], sig["dff"][acc].mean(0), pen=pg.mkPen((40, 110, 220), width=1.2),
+                    name="平均 ΔF/F")
+        track = None
+        if self.ws.step("behavior"):
+            res = analyze(load_track(self.ws), self.beh_page.params())
+            n = min(len(tb), len(res["t"]))
+            if "freezing" in res:
+                tr.plot(tb[:n], res["freezing"][:n].astype(float) * 0.1, pen=pg.mkPen((220, 60, 60)),
+                        fillLevel=0, brush=(220, 60, 60, 50), name="僵直")
+            if self.beh_page.cfg.source == "tracking":
+                track = res
+        line = pg.InfiniteLine(0, angle=90, pen=pg.mkPen((0, 0, 0), width=1.5))
+        tr.addItem(line)
+        dot = pg.ScatterPlotItem(size=12, brush=pg.mkBrush(255, 60, 60), pen=pg.mkPen("w"))
+        self.view.add_overlay(dot)
+        tr.setLabel("bottom", "miniscope 时间 (秒)")
+        tr.setTitle("")
+        tr.show()
+        self._joint = {"tb": tb, "line": line, "dot": dot, "track": track}
+        self._on_frame(self.view.current_index())
+
+    def _show_sync_qc(self):
+        from ..core.sync import load_sync
+        if not self._need("sync", "同步"):
+            return
+        tr = self.trace
+        tr.clear()
+        f = self.ws.path("behavior/led_trace.npy")
+        if f.exists():
+            led = np.load(f)
+            tr.plot(np.arange(len(led)), led, pen=pg.mkPen((40, 110, 220)))
+            st = self.ws.step("sync")["params"]
+            if "threshold" in st:
+                tr.addItem(pg.InfiniteLine(st["threshold"], angle=0, pen=pg.mkPen((220, 60, 60), style=Qt.DashLine)))
+            tr.setLabel("bottom", "行为视频帧")
+            tr.setTitle("LED 亮度：应能清楚看到开始长亮、周期短闪和结束长亮，红线为识别阈值")
+        else:
+            tb = load_sync(self.ws)
+            tr.plot(np.arange(len(tb)), tb, pen=pg.mkPen((40, 110, 220)))
+            tr.setLabel("bottom", "行为视频帧")
+            tr.setLabel("left", "miniscope 时间 (秒)")
+            tr.setTitle("手动对齐：行为帧与 miniscope 时间的对应关系")
+        tr.show()
+
+    def joint_analysis(self, kind):
+        from ..core.extraction import load_cells
+        from ..core.signals import load_signals
+        from ..core import sync as S
+        if not (self._need("signals", "信号与 spike") and self._need("behavior", "行为分析")
+                and self._need("sync", "同步")):
+            return
+        sp = self.sync_page
+        try:
+            cfg = self.beh_page.params()
+            if kind == "export":
+                from PySide6.QtWidgets import QFileDialog
+                d = QFileDialog.getExistingDirectory(self, "选择导出文件夹", str(self.ws.root))
+                if d:
+                    out = S.export_joint(self.ws, cfg, d)
+                    QMessageBox.information(self, "导出完成", f"已保存到:\n{out}\n"
+                                            "aligned_frames.csv：逐帧对齐的钙信号与行为\n"
+                                            "cell_behavior_stats.csv：每个细胞与僵直/速度的关系")
+                return
+            sig = load_signals(self.ws)
+            acc = load_cells(self.ws)["accepted"].astype(bool)
+            ids = np.where(acc)[0]
+            dff = sig["dff"][acc]
+            b = S.behavior_on_calcium_frames(self.ws, cfg)
+            tr = self.trace
+            tr.clear()
+            if kind == "freezing":
+                if "freezing" not in b:
+                    raise ValueError("行为数据里没有僵直信息")
+                m = S.state_modulation(dff, b["freezing"], b["valid"])
+                up = m["p_up"] < 0.05
+                dn = m["p_down"] < 0.05
+                col = [(220, 60, 60) if u else (40, 110, 220) if d else (150, 150, 150) for u, d in zip(up, dn)]
+                tr.addItem(pg.ScatterPlotItem(m["out_state"], m["in_state"], size=8,
+                                              brush=[pg.mkBrush(*c) for c in col], pen=None))
+                lo = float(min(m["out_state"].min(), m["in_state"].min()))
+                hi = float(max(m["out_state"].max(), m["in_state"].max()))
+                tr.plot([lo, hi], [lo, hi], pen=pg.mkPen((0, 0, 0), style=Qt.DashLine))
+                tr.setLabel("bottom", "运动时平均 ΔF/F"); tr.setLabel("left", "僵直时平均 ΔF/F")
+                tr.setTitle("每个点是一个细胞：红 = 僵直时更活跃，蓝 = 僵直时更安静（p < 0.05）")
+                sp.result_lbl.setText(f"{len(ids)} 个细胞中：僵直时显著升高 {up.sum()} 个，"
+                                      f"显著降低 {dn.sum()} 个（循环平移检验，p < 0.05）。\n"
+                                      f"升高：{', '.join('#' + str(i) for i in ids[up][:30])}")
+            elif kind == "speed":
+                c = S.speed_correlation(dff, b["speed"], b["valid"])
+                sig_ = c["p"] < 0.05
+                hist, edges = np.histogram(c["r"], bins=20)
+                tr.addItem(pg.BarGraphItem(x0=edges[:-1], x1=edges[1:], height=hist, brush=(40, 110, 220, 160)))
+                tr.setLabel("bottom", "与速度的相关系数 r"); tr.setLabel("left", "细胞数")
+                tr.setTitle("每个细胞 ΔF/F 与运动速度的相关性分布")
+                sp.result_lbl.setText(f"{len(ids)} 个细胞中：与速度显著正相关 {(sig_ & (c['r'] > 0)).sum()} 个，"
+                                      f"负相关 {(sig_ & (c['r'] < 0)).sum()} 个（p < 0.05）。")
+            elif kind == "peth":
+                src = sp.event_src.currentText()
+                t = b["times"]
+                if src == "僵直开始":
+                    if "freezing" not in b:
+                        raise ValueError("行为数据里没有僵直信息")
+                    ev = S.event_onsets(b["freezing"], t, min_gap_s=sp.post.value())
+                elif src.startswith("进入区域 "):
+                    ev = S.event_onsets(b["zones"][src[5:]], t, min_gap_s=sp.post.value())
+                else:
+                    txt = sp.event_times.text().replace("，", ",").replace(" ", ",")
+                    ev = np.array([float(v) for v in txt.split(",") if v.strip()])
+                axis, seg = S.peri_event(dff, t, ev, sp.pre.value(), sp.post.value())
+                if len(seg) == 0:
+                    raise ValueError("没有可用的事件（事件太靠近记录开头或结尾，或没有事件）")
+                mean_cells = seg.mean(0)               # cells x time
+                pop = mean_cells.mean(0)
+                sem = mean_cells.std(0) / np.sqrt(max(1, mean_cells.shape[0]))
+                tr.plot(axis, pop, pen=pg.mkPen((40, 110, 220), width=2))
+                tr.addItem(pg.FillBetweenItem(pg.PlotDataItem(axis, pop - sem), pg.PlotDataItem(axis, pop + sem),
+                                              brush=(40, 110, 220, 50)))
+                tr.addItem(pg.InfiniteLine(0, angle=90, pen=pg.mkPen((220, 60, 60), style=Qt.DashLine)))
+                tr.setLabel("bottom", "相对事件的时间 (秒)"); tr.setLabel("left", "ΔF/F")
+                tr.setTitle(f"所有细胞平均（± SEM），{len(seg)} 个事件")
+                order = np.argsort(-mean_cells[:, axis >= 0].mean(1))
+                img = mean_cells[order]
+                hi = np.percentile(np.abs(img), 99) or 1
+                self.view.set_image(np.clip(img / hi, -1, 1), f"每个细胞的事件前后平均（{src}，按事件后反应排序）")
+                self.view.hist.gradient.loadPreset("bipolar")
+                self.view.vb.setAspectLocked(False)
+                self.view.img.setRect(pg.QtCore.QRectF(axis[0], 0, axis[-1] - axis[0], len(img)))
+                self.view.vb.autoRange()
+                sp.result_lbl.setText(f"事件：{src}，共 {len(ev)} 个，可用 {len(seg)} 个（窗口内完整）。")
+            tr.show()
+        except Exception as e:
+            QMessageBox.warning(self, "分析失败", str(e))
 
     def closeEvent(self, e):
         if self.worker is not None:
