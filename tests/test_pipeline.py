@@ -39,7 +39,11 @@ def test_full_calcium_pipeline(tmp_path):
     r, c = linear_sum_assignment(D)
     hit = D[r, c] < 3
     assert hit.sum() >= 9, (out, hit.sum())
-    assert out["n_cells"] <= 14
+    # high recall: doubtful candidates are kept, but scored low so review can drop them in bulk
+    q = cells["quality"]
+    assert (q >= 0.6).sum() <= 14, (out, np.sort(q))
+    assert q[c[hit]].min() >= 0.6
+    assert out["n_low_quality"] == int((q < 0.6).sum())
     corr = [np.corrcoef(gt["C"][i], cells["C"][j])[0, 1] for i, j in zip(r[hit], c[hit])]
     assert np.mean(corr) > 0.9
     run_signals(None, ws, SignalParams(tau_s=0.8))
@@ -72,10 +76,19 @@ def test_review_toggle_and_merge(tmp_path):
     acc = set_accepted(ws, [0])
     assert not acc[0] and acc[1:].all()
     set_accepted(ws, [0])
+    from miniscope_gui.core.review import quality_of, reject_low_quality, restore_all
+    q = quality_of(load_cells(ws))
+    n_low = reject_low_quality(ws, 60)
+    acc = load_cells(ws)["accepted"]
+    assert n_low == int((q < 60).sum()) and (acc == (q >= 60)).all()
+    assert restore_all(ws) == n_low and load_cells(ws)["accepted"].all()
     new = merge_cells(ws, [1, 2])
     cells = load_cells(ws)
     assert len(cells["C"]) == n - 1 and new == 1
     assert cells["A"].shape[1] == n - 1
+    for k in ("quality", "source", "q_cn", "q_nb_corr"):
+        assert len(cells[k]) == n - 1
+    assert np.isclose(cells["quality"][1], max(q[1], q[2]) / 100)
     assert load_signals(ws)["dff"].shape[0] == n - 1
 
 

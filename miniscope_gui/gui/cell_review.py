@@ -12,6 +12,7 @@ GREEN = (60, 220, 90)
 RED = (235, 70, 70)
 SEL = (255, 230, 0)
 ORANGE = (255, 150, 30)
+CYAN = (60, 200, 255)     # low-confidence candidate
 
 
 class CellReview(QObject):
@@ -22,6 +23,9 @@ class CellReview(QObject):
         self.ws = None
         self.cells = None
         self.suspect = np.zeros(0, bool)
+        self.quality = np.zeros(0)
+        self.threshold = 60.0      # quality score (0-100) below which a candidate is "low confidence"
+        self.by_quality = False    # previous/next walk from the lowest score up
         self.signals = None
         self.curves = []
         self.selected: list[int] = []
@@ -34,6 +38,8 @@ class CellReview(QObject):
         st = ws.step("extraction") or {}
         diam = float(st.get("params", {}).get("cell_diameter", 10))
         self.suspect = suspect_cells(self.cells["A"], self.cells["shape"], diam)
+        from ..core.review import quality_of
+        self.quality = quality_of(self.cells)
         from ..core.signals import load_signals
         self.signals = load_signals(ws) if ws.path("signals.npz").exists() else None
         self.view.set_image(background, title)
@@ -81,22 +87,44 @@ class CellReview(QObject):
             self.selected = [k]
         self._redraw()
 
+    def order(self) -> np.ndarray:
+        n = len(self.cells["C"])
+        return np.argsort(self.quality, kind="stable") if self.by_quality else np.arange(n)
+
     def step(self, delta):
         if self.cells is None or not len(self.cells["C"]):
             return
-        k = (self.selected[-1] if self.selected else -1) + delta
-        self.selected = [k % len(self.cells["C"])]
+        order = self.order()
+        if self.selected:
+            pos = int(np.flatnonzero(order == self.selected[-1])[0]) + delta
+        else:
+            pos = 0 if delta > 0 else -1
+        self.selected = [int(order[pos % len(order)])]
         self._redraw()
+
+    def set_threshold(self, value: float):
+        self.threshold = float(value)
+        if self.active:
+            self._redraw()
+
+    def low_quality(self) -> np.ndarray:
+        return self.quality < self.threshold
 
     # ------------------------------------------------------------- drawing
     def _redraw(self):
         acc = self.cells["accepted"].astype(bool)
+        low = self.low_quality()
         for k, item in enumerate(self.curves):
             if k in self.selected:
                 item.setPen(pg.mkPen(SEL, width=3))
+            elif not acc[k]:
+                item.setPen(pg.mkPen(RED, width=1.5))
+            elif self.suspect[k]:
+                item.setPen(pg.mkPen(ORANGE, width=1.5))
+            elif low[k]:
+                item.setPen(pg.mkPen(CYAN, width=1.5, style=Qt.DashLine))
             else:
-                col = (ORANGE if self.suspect[k] else GREEN) if acc[k] else RED
-                item.setPen(pg.mkPen(col, width=1.5))
+                item.setPen(pg.mkPen(GREEN, width=1.5))
         self._plot_traces()
 
     def _plot_traces(self):
@@ -129,7 +157,8 @@ class CellReview(QObject):
                 span = float(np.nanmax(y) - np.nanmin(y)) or 1.0
             offset += span * 1.15
         acc = self.cells["accepted"]
-        names = ", ".join(f"#{k}{'' if acc[k] else '（已删除）'}" for k in self.selected)
+        names = ", ".join(f"#{k}（质量 {self.quality[k]:.0f}{'' if acc[k] else '，已删除'}）"
+                          for k in self.selected)
         unit = "ΔF/F" if self.signals is not None else "荧光"
         self.plot.setTitle(f"细胞 {names}  ·  灰色 = {unit}，蓝色 = 去噪"
                            + ("，红色竖线 = spike" if self.signals is not None else ""))
@@ -142,4 +171,8 @@ class CellReview(QObject):
         n_s = int((self.suspect & acc).sum())
         if n_s:
             txt += f"\n橙色 {n_s} 个形状可疑（过大或过长），建议逐个看一下。"
+        n_low = int((self.low_quality() & acc & ~self.suspect).sum())
+        if n_low:
+            txt += (f"\n蓝色虚线 {n_low} 个是低置信候选（质量分 < {self.threshold:.0f}），"
+                    "可以逐个看，也可以一键删除。")
         return txt

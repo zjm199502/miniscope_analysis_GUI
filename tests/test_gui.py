@@ -69,6 +69,18 @@ def test_gui_flow(tmp_path, app):
     w.review.step(1)
     w._toggle_cells()
     assert w.review.summary()
+    # bulk review of low-confidence candidates
+    w.ext_page.q_thr.setValue(101 if w.ext_page.q_thr.maximum() > 100 else 100)
+    w._reject_low_quality()
+    from miniscope_gui.core.extraction import load_cells
+    assert not load_cells(w.ws)["accepted"][w.review.quality < 100].any()
+    w._restore_cells()
+    assert load_cells(w.ws)["accepted"].all()
+    w.ext_page.q_thr.setValue(60)
+    w.ext_page.by_quality.setChecked(True)
+    w.review.selected = []
+    w.review.step(1)
+    assert w.review.selected == [int(np.argsort(w.review.quality, kind="stable")[0])]
     w.show_result("cn"); w.show_result("pnr")
 
     w.steps.setCurrentRow(5)

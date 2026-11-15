@@ -115,6 +115,12 @@ class MainWindow(QMainWindow):
         self.ext_page.merge_btn.clicked.connect(self._merge_cells)
         self.ext_page.prev_btn.clicked.connect(lambda: self.review.step(-1))
         self.ext_page.next_btn.clicked.connect(lambda: self.review.step(1))
+        self.ext_page.reject_low_btn.clicked.connect(self._reject_low_quality)
+        self.ext_page.restore_btn.clicked.connect(self._restore_cells)
+        self.ext_page.q_thr.valueChanged.connect(self._quality_threshold)
+        self.ext_page.by_quality.toggled.connect(lambda on: setattr(self.review, "by_quality", on))
+        self.review.threshold = float(self.ext_page.q_thr.value())
+        self.review.by_quality = self.ext_page.by_quality.isChecked()
 
     def _make_extra_pages(self):
         self.beh_page = BehaviorPage(self)
@@ -399,6 +405,31 @@ class MainWindow(QMainWindow):
         set_accepted(self.ws, self.review.selected)
         self.review.reload()
         self.ext_page.review_info.setText(self.review.summary())
+
+    def _quality_threshold(self, v):
+        self.review.set_threshold(v)
+        if self.review.active:
+            self.ext_page.review_info.setText(self.review.summary())
+
+    def _reject_low_quality(self):
+        from ..core.review import reject_low_quality
+        if not (self.ws and self.ws.step("extraction")):
+            QMessageBox.information(self, "提示", "请先完成细胞提取")
+            return
+        thr = float(self.ext_page.q_thr.value())
+        n = reject_low_quality(self.ws, thr)
+        self.review.reload()
+        self.ext_page.review_info.setText(self.review.summary())
+        self.statusBar().showMessage(f"已删除 {n} 个质量分低于 {thr:.0f} 的候选（可点「全部恢复」撤销）", 8000)
+
+    def _restore_cells(self):
+        from ..core.review import restore_all
+        if not (self.ws and self.ws.step("extraction")):
+            return
+        n = restore_all(self.ws)
+        self.review.reload()
+        self.ext_page.review_info.setText(self.review.summary())
+        self.statusBar().showMessage(f"已恢复 {n} 个细胞", 5000)
 
     def _merge_cells(self):
         from ..core.review import merge_cells

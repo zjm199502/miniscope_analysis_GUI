@@ -47,6 +47,8 @@ class ExtractionParams:
     merge_threshold: float = 0.8  # temporal correlation for merging overlapping cells
     n_iterations: int = 2
     residual_pass: bool = True    # second search for cells in the unexplained residual
+    extra_candidates: bool = True  # keep low-confidence candidates (flagged) instead of dropping them
+    candidate_relax: float = 0.75  # relaxed thresholds for those: min_corr and min_pnr x this
     min_area_fraction: float = 0.15   # of a disk with the cell diameter
     chunk_frames: int = 200
 
@@ -150,6 +152,9 @@ def summary_images(movie, sigma: float, chunk: int, progress, should_stop, mask=
 # ------------------------------------------------------------------ 2. seeds
 SEED_WIN = 0.3
 SEED_SEP = 0.4
+DISTINCT_CORR = 0.5
+FOOTPRINT_R = 1.0
+LOW_QUALITY = 0.6    # default review threshold on the 0-1 quality score
 
 def find_seeds(cn, pnr, p: ExtractionParams, mask=None):
     score = cn * pnr
@@ -191,11 +196,16 @@ class _Patches:
         return block[:, y0:y1, x0:x1].reshape(block.shape[0], -1)
 
 
-def _clean_footprint(a_patch, box, centre=None, rel_thr=0.3):
-    """Keep the connected component around the peak (or centre); zero the rest."""
+def _clean_footprint(a_patch, box, centre=None, rel_thr=0.3, max_r=None):
+    """Keep the connected component around the peak (or centre); zero the rest.
+    With max_r, pixels farther than max_r from the centre are dropped first, so a
+    dim cell's footprint cannot creep onto a brighter neighbour."""
     y0, y1, x0, x1 = box
     img = a_patch.reshape(y1 - y0, x1 - x0).copy()
     img[img < 0] = 0
+    if max_r is not None and centre is not None:
+        yy, xx = np.ogrid[y0:y1, x0:x1]
+        img[(yy - centre[0]) ** 2 + (xx - centre[1]) ** 2 > max_r ** 2] = 0
     if img.max() <= 0:
         return np.zeros_like(a_patch)
     lab, n = ndimage.label(img > rel_thr * img.max())
@@ -239,7 +249,7 @@ class _Residual:
         return blk.reshape(T_, H, W)
 
 
-def _init_cells(Y, seeds, H, W, R, chunk, progress, should_stop, f0, df):
+def _init_cells(Y, seeds, H, W, R, chunk, progress, should_stop, f0, df, max_r=None):
     """Initial footprints: correlation of each patch pixel with the seed's trace."""
     T = Y.shape[0]
     npix = H * W
@@ -270,7 +280,7 @@ def _init_cells(Y, seeds, H, W, R, chunk, progress, should_stop, f0, df):
         cov = yc[k] / T - ybar[idx] * cbar
         corr = cov / (ystd[idx] * np.sqrt(max(cvar, 1e-12)))
         a = np.where(corr > 0.3, cov / max(cvar, 1e-12), 0.0)
-        a_list.append(_clean_footprint(a, patches.boxes[k], seeds[k]))
+        a_list.append(_clean_footprint(a, patches.boxes[k], seeds[k], max_r=max_r))
     keep = [k for k in range(K) if a_list[k].sum() > 0]
     seeds = seeds[keep].reshape(-1, 2)
     a_list, C = [a_list[k] for k in keep], C[keep]
@@ -278,9 +288,10 @@ def _init_cells(Y, seeds, H, W, R, chunk, progress, should_stop, f0, df):
     return seeds, A, C, ybar
 
 
-def _distinct_new(A, C, n_old, H, W, diameter, max_corr=0.5):
+def _distinct_new(A, C, n_old, H, W, diameter, max_corr=None):
     """Keep all old cells, and new cells whose activity differs from every old cell
     within one diameter."""
+    max_corr = DISTINCT_CORR if max_corr is None else max_corr
     K = A.shape[1]
     keep = np.ones(K, bool)
     if K == n_old or n_old == 0:
@@ -338,7 +349,8 @@ def run_extraction(session, ws: Workspace, p: ExtractionParams,
 
     # 3. init
     R = int(np.ceil(1.5 * p.cell_diameter))   # patch half-width: room for the whole cell
-    seeds, A, C, ybar = _init_cells(Y, seeds, H, W, R, chunk, progress, should_stop, 0.27, 0.10)
+    seeds, A, C, ybar = _init_cells(Y, seeds, H, W, R, chunk, progress, should_stop, 0.27, 0.10,
+                                    max_r=FOOTPRINT_R * p.cell_diameter)
     patches = _Patches(seeds, H, W, R)
     b0 = ybar.astype(np.float32)  # offset, refined below
 
@@ -363,7 +375,8 @@ def run_extraction(session, ws: Workspace, p: ExtractionParams,
             new = new[d.min(1) >= 0.5 * p.cell_diameter]
         if len(new):
             new, A2, C2, _ = _init_cells(res, new, H, W, R, chunk,
-                                         lambda f, m: progress(f, "初始化新增的细胞"), should_stop, 0.75, 0.04)
+                                         lambda f, m: progress(f, "初始化新增的细胞"), should_stop, 0.75, 0.04,
+                                         max_r=FOOTPRINT_R * p.cell_diameter)
             if len(new):
                 n_old = A.shape[1]
                 A = sp.hstack([A, A2]).tocsc().astype(np.float32)
@@ -380,6 +393,19 @@ def run_extraction(session, ws: Workspace, p: ExtractionParams,
                                                    progress, should_stop, 0.82, 0.04, "补充细胞后")
         progress(0.86, f"残差中新增 {len(new)} 个候选细胞")
 
+    # 4c. high-recall pass: with the model fixed, collect every remaining spot in the
+    #     residual that passes relaxed thresholds as a low-confidence candidate. The
+    #     cells found so far keep their shapes, so extra candidates cannot pull them
+    #     apart; doubtful candidates get a low quality score in review instead of
+    #     being dropped (deleting in review is easy, adding a missed cell is not).
+    source = np.zeros(A.shape[1], np.int8)
+    cn_res = pnr_res = None
+    if p.extra_candidates and len(C):
+        A, C, b0, seeds, n_extra, cn_res, pnr_res = _candidate_pass(Y, A, C, b0, ybar, seeds, p, H, W, R, sigma,
+                                                    chunk, mask, progress, should_stop)
+        source = np.concatenate([source, np.full(n_extra, 2, np.int8)])
+        progress(0.88, f"补充 {n_extra} 个低置信候选")
+
     # 5. final traces + raw traces + local fluorescence for dF/F
     C, b0, raw, F_local = _final_traces(ws, Y, A, C, b0, ybar, chunk, progress, should_stop)
 
@@ -389,15 +415,131 @@ def run_extraction(session, ws: Workspace, p: ExtractionParams,
     snr = C.max(1) / np.maximum(noise, 1e-6)
     min_area = p.min_area_fraction * np.pi * (p.cell_diameter / 2) ** 2
     ok = (area >= min_area) & (C.max(1) > 0)
-    A, C, raw, F_local, seeds, snr, area = (A[:, ok], C[ok], raw[ok], F_local[ok],
-                                            seeds[ok], snr[ok], area[ok])
+    A, C, raw, F_local, seeds, snr, area, source = (A[:, ok], C[ok], raw[ok], F_local[ok],
+                                                    seeds[ok], snr[ok], area[ok], source[ok])
     centres = _centroids(A, H, W)
+    feats = quality_features(A, C, raw, centres, seeds, source, cn, pnr, cn_res, pnr_res,
+                             p.cell_diameter, (H, W))
+    # late candidates that only echo a neighbour's activity, or are streaks, are
+    # leftovers of cells already found rather than cells of their own
+    disk = np.pi * (p.cell_diameter / 2) ** 2
+    junk = (source == 2) & ((feats["nb_corr"] >= 0.8) | (feats["elong"] >= 3.0)
+                            | (area < 0.25 * disk))
+    if junk.any():
+        ok = ~junk
+        A, C, raw, F_local, seeds, snr, area, source = (A[:, ok], C[ok], raw[ok], F_local[ok],
+                                                        seeds[ok], snr[ok], area[ok], source[ok])
+        centres = _centroids(A, H, W)
+        feats = quality_features(A, C, raw, centres, seeds, source, cn, pnr, cn_res, pnr_res,
+                                 p.cell_diameter, (H, W))
+    quality = quality_score(feats, snr, area, source, p.cell_diameter)
 
     save_cells(ws, A=A, C=C, raw=raw, F_local=F_local, centres=centres, snr=snr,
-               area=area, accepted=np.ones(len(C), bool), shape=(H, W))
-    ws.record_step("extraction", asdict(p), {"cells": CELLS_FILE, "n_cells": int(len(C))})
-    progress(1.0, f"细胞提取完成，共 {len(C)} 个细胞")
-    return {"n_cells": int(len(C))}
+               area=area, accepted=np.ones(len(C), bool), shape=(H, W), source=source,
+               quality=quality, **{f"q_{k}": v for k, v in feats.items()})
+    n_low = int((quality < LOW_QUALITY).sum())
+    ws.record_step("extraction", asdict(p), {"cells": CELLS_FILE, "n_cells": int(len(C)),
+                                             "n_low_quality": n_low})
+    progress(1.0, f"细胞提取完成，共 {len(C)} 个候选，其中 {n_low} 个低置信")
+    return {"n_cells": int(len(C)), "n_low_quality": n_low}
+
+
+def _candidate_pass(Y, A, C, b0, ybar, seeds, p, H, W, R, sigma, chunk, mask, progress, should_stop):
+    """Add low-confidence candidates from the residual, without changing existing cells."""
+    res = _Residual(Y, A, C, b0)
+    cn, pnr, _, _ = summary_images(res, sigma, chunk,
+                                   lambda f, m: progress(0.86 + 0.01 * f / 0.25, "寻找低置信候选"),
+                                   should_stop, mask)
+    q = ExtractionParams(**{**asdict(p), "min_corr": p.min_corr * p.candidate_relax,
+                            "min_pnr": p.min_pnr * p.candidate_relax})
+    new = find_seeds(cn, pnr, q, mask)
+    if len(new):
+        cen = _centroids(A, H, W)
+        d = np.hypot(new[:, None, 0] - cen[None, :, 0], new[:, None, 1] - cen[None, :, 1])
+        new = new[d.min(1) >= 0.5 * p.cell_diameter]
+    if not len(new):
+        return A, C, b0, seeds, 0, cn, pnr
+    new, A2, C2, _ = _init_cells(res, new, H, W, R, chunk,
+                                 lambda f, m: progress(0.87, "初始化低置信候选"), should_stop, 0.87, 0.0,
+                                 max_r=FOOTPRINT_R * p.cell_diameter)
+    if not len(new):
+        return A, C, b0, seeds, 0, cn, pnr
+    # traces of the new candidates only, fitted to the residual
+    zero = np.zeros(H * W, np.float32)
+    C2, _ = _update_C(res, A2, C2, zero, zero, chunk, lambda f, m: None, should_stop, 0, 0, "")
+    ok = C2.max(1) > 0
+    A2, C2, new = A2[:, ok], C2[ok], new[ok]
+    A = sp.hstack([A, A2]).tocsc().astype(np.float32)
+    C = np.vstack([C, C2]).astype(np.float32)
+    b0 = (ybar - A @ C.mean(1)).astype(np.float32)
+    return A, C, b0, np.vstack([seeds, new]), int(ok.sum()), cn, pnr
+
+
+def quality_features(A, C, raw, centres, seeds, source, cn, pnr, cn_res, pnr_res, diameter, shape):
+    """Per-cell evidence used for the quality score. cn/pnr are read at the seed on
+    the summary image the cell was found in (the residual one for late candidates)."""
+    K = C.shape[0]
+    iy, ix = seeds[:, 0], seeds[:, 1]
+    cn_loc = cn[iy, ix].astype(np.float32)
+    pnr_loc = pnr[iy, ix].astype(np.float32)
+    late = source == 2
+    if cn_res is not None and late.any():
+        cn_loc[late] = cn_res[iy[late], ix[late]]
+        pnr_loc[late] = pnr_res[iy[late], ix[late]]
+    offset = np.hypot(centres[:, 0] - iy, centres[:, 1] - ix).astype(np.float32)
+    # shape: long/short axis ratio of the footprint
+    H, W = shape
+    yy, xx = np.mgrid[:H, :W]
+    yy, xx = yy.ravel().astype(float), xx.ravel().astype(float)
+    elong = np.ones(K, np.float32)
+    A = A.tocsc()
+    for k in range(K):
+        sl = slice(A.indptr[k], A.indptr[k + 1])
+        idx, w = A.indices[sl], A.data[sl].astype(float)
+        if len(idx) < 3 or w.sum() <= 0:
+            continue
+        y, x = yy[idx], xx[idx]
+        cov = np.cov(np.stack([y, x]), aweights=w)
+        ev = np.sort(np.linalg.eigvalsh(cov))
+        elong[k] = np.sqrt(ev[1] / ev[0]) if ev[0] > 1e-9 else 10.0
+    # activity overlap with neighbours: a doubtful candidate that only echoes a neighbour
+    Rz = raw - raw.mean(1, keepdims=True)
+    Rz /= np.maximum(np.linalg.norm(Rz, axis=1, keepdims=True), 1e-12)
+    nb_corr = np.zeros(K, np.float32)
+    nb_dist = np.full(K, np.inf, np.float32)
+    if K > 1:
+        d = np.hypot(centres[:, None, 0] - centres[None, :, 0], centres[:, None, 1] - centres[None, :, 1])
+        np.fill_diagonal(d, np.inf)
+        nb_dist = d.min(1).astype(np.float32)
+        for k in range(K):
+            near = np.flatnonzero(d[k] < diameter)
+            if len(near):
+                nb_corr[k] = float((Rz[near] @ Rz[k]).max())
+    return dict(cn=cn_loc, pnr=pnr_loc, nb_corr=nb_corr, nb_dist=nb_dist,
+                offset=offset, elong=elong)
+
+
+def quality_score(feats, snr, area, source, diameter):
+    """0-1 confidence that a candidate is a real, separate cell (higher = better).
+
+    Weighted geometric mean of six pieces of evidence, each scaled to 0-1: local
+    correlation and peak-to-noise at the seed, trace SNR, footprint size and
+    roundness, and (penalised) activity that only echoes a neighbouring cell.
+    """
+    disk = np.pi * (diameter / 2) ** 2
+    parts = [
+        (2.0, np.clip((feats["cn"] - 0.6) / 0.35, 0, 1)),
+        (1.0, np.clip((feats["pnr"] - 6.0) / 8.0, 0, 1)),
+        (1.0, np.clip((snr - 3.0) / 7.0, 0, 1)),
+        (1.0, np.clip((area / disk - 0.25) / 0.45, 0, 1)),
+        (1.5, np.clip((0.95 - feats["nb_corr"]) / 0.4, 0, 1)),
+        (1.5, np.clip((3.0 - feats["elong"]) / 1.5, 0, 1)),
+    ]
+    wsum = sum(w for w, _ in parts)
+    logq = sum(w * np.log(np.maximum(x, 1e-3)) for w, x in parts) / wsum
+    q = np.exp(logq)
+    q[q < 0.0011] = 0.0
+    return q.astype(np.float32)
 
 
 def _noise_std(x):
@@ -455,7 +597,8 @@ def _update_A(Y, A, C, b0, patches, seeds, chunk, p, progress, should_stop, f0, 
         a_k = np.asarray(A_loc[:, k].toarray()).ravel()
         grad = yc[k] - b0[idx] * csum[k] - np.asarray(A_loc @ CCt[:, k]).ravel()
         a_k = np.maximum(0, a_k + grad / CCt[k, k])
-        new_a.append(_clean_footprint(a_k, patches.boxes[k], seeds[k]))
+        new_a.append(_clean_footprint(a_k, patches.boxes[k], seeds[k],
+                                     max_r=FOOTPRINT_R * p.cell_diameter))
     keep = [k for k in range(K) if new_a[k].sum() > 0]
     seeds = seeds[keep]
     C = C[keep]

@@ -50,6 +50,17 @@ def merge_cells(ws: Workspace, ids) -> int:
         else:
             arr.insert(new_index, True)
         out[k] = np.array(arr)
+    # other per-cell values (quality score and its evidence, source): take the
+    # member that is the most convincing cell
+    best = ids[int(np.argmax(c["quality"][ids]))] if "quality" in c else ids[0]
+    K = A.shape[1]
+    for k, v in c.items():
+        if k in out or k in ("A", "centres", "shape") or not isinstance(v, np.ndarray) \
+                or v.ndim != 1 or len(v) != K:
+            continue
+        arr = list(v[keep])
+        arr.insert(new_index, v[best])
+        out[k] = np.array(arr, dtype=v.dtype)
     H, W = c["shape"]
     save_cells(ws, A=A2, centres=_centroids(A2, H, W), shape=(H, W), **out)
     st = ws.step("signals")
@@ -58,3 +69,32 @@ def merge_cells(ws: Workspace, ids) -> int:
         prm = {k: v for k, v in st["params"].items() if k in SignalParams.__dataclass_fields__}
         run_signals(None, ws, SignalParams(**prm))
     return new_index
+
+
+def quality_of(cells: dict) -> np.ndarray:
+    """Quality score 0-100 per cell (cells from older versions have none: 100)."""
+    q = cells.get("quality")
+    return np.full(len(cells["C"]), 100.0) if q is None else np.asarray(q, float) * 100
+
+
+def reject_low_quality(ws: Workspace, threshold: float) -> int:
+    """Delete (mark not accepted) every kept cell whose quality score is below
+    threshold (0-100). Returns how many were deleted; undo with restore_all."""
+    cells = load_cells(ws)
+    acc = cells["accepted"].astype(bool).copy()
+    low = acc & (quality_of(cells) < threshold)
+    if low.any():
+        acc[low] = False
+        cells["accepted"] = acc
+        save_cells(ws, **cells)
+    return int(low.sum())
+
+
+def restore_all(ws: Workspace) -> int:
+    cells = load_cells(ws)
+    acc = cells["accepted"].astype(bool)
+    n = int((~acc).sum())
+    if n:
+        cells["accepted"] = np.ones(len(acc), bool)
+        save_cells(ws, **cells)
+    return n
