@@ -68,3 +68,49 @@ def test_no_update_when_same(monkeypatch):
         return _Resp(json.dumps({"tag_name": "v" + updater.__version__, "assets": []}).encode())
     monkeypatch.setattr(updater.urllib.request, "urlopen", fake_open)
     assert updater.check_latest() is None
+
+
+def test_channel_patch_and_full(monkeypatch, tmp_path):
+    from miniscope_gui import patching
+    man = {"version": "99.0.3", "notes": "n", "min_base": "99.0.1",
+           "patch": {"url": "https://x/p.zip", "size": 5},
+           "full_version": "99.0.1", "full": {"MiniscopeAnalysis-Windows.zip": {"url": "https://x/w.zip", "size": 9}}}
+
+    def fake_open(req, timeout=None, context=None):
+        return _Resp(json.dumps(man).encode())
+    monkeypatch.setattr(updater.urllib.request, "urlopen", fake_open)
+    monkeypatch.setattr(updater, "asset_name", lambda: "MiniscopeAnalysis-Windows.zip")
+    # base new enough -> small update
+    monkeypatch.setattr(patching, "base_version", lambda: "99.0.1")
+    r = updater.check_latest()
+    assert r.kind == "patch" and r.asset_url == "https://x/p.zip"
+    # old base -> whole app first
+    monkeypatch.setattr(patching, "base_version", lambda: "0.2.0")
+    r = updater.check_latest()
+    assert r.kind == "full" and r.asset_url == "https://x/w.zip"
+    # running from source -> only the download page
+    monkeypatch.setattr(patching, "base_version", lambda: None)
+    assert updater.check_latest().kind in ("full", "page")
+
+
+def test_patch_install_and_activate(monkeypatch, tmp_path):
+    import sys
+    from miniscope_gui import patching
+    monkeypatch.setattr(patching, "data_dir", lambda: tmp_path / "data")
+    src = tmp_path / "unz"
+    (src / "miniscope_gui").mkdir(parents=True)
+    (src / "miniscope_gui" / "__init__.py").write_text('__version__ = "1.0.5"\n')
+    dest = patching.install(src, "1.0.5", "1.0.1")
+    assert (dest / "miniscope_gui" / "__init__.py").exists()
+    info = patching.read_current()
+    assert patching.usable(info, "1.0.1") and patching.usable(info, "1.0.4")
+    assert not patching.usable(info, "1.0.0")        # base too old for this patch
+    assert not patching.usable(info, "1.0.5")        # base already this new
+    monkeypatch.setattr(patching, "base_version", lambda: "1.0.2")
+    path = list(sys.path)
+    try:
+        assert patching.activate() == "1.0.5" and sys.path[0] == str(dest)
+    finally:
+        sys.path[:] = path
+    patching.mark_bad("1.0.5")
+    assert not patching.usable(patching.read_current(), "1.0.2")

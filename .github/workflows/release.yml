@@ -1,26 +1,40 @@
 name: Build and release
 
-# Manual run: Actions -> "Build and release" -> Run workflow, enter the tag (e.g. v0.2.0).
-# The tag must match miniscope_gui/__version__. Without a tag, builds are kept as artifacts only.
+# Actions -> "Build and release" -> Run workflow, enter the version (e.g. 0.2.3).
+# The version must equal miniscope_gui/__version__ on main.
+#
+# Every version goes to the in-app update channel (pre-release "updates"):
+#   small update  = only the miniscope_gui package (a few hundred KB)
+#   full build    = whole app, when x.y.0 / x.y.10 / ..., when force_full is set,
+#                   or when packaging/min_base.txt names this version (libraries changed)
+# Every 10th version (patch number divisible by 10) is also a normal GitHub
+# Release with installers, for new users.
 on:
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: "Release tag, e.g. v0.2.0 (empty = build only)"
+      version:
+        description: "Version, e.g. 0.2.3"
+        required: true
+      force_full:
+        description: "Also build the whole app (libraries or the launcher changed)"
+        type: boolean
+        default: false
+      attach_to_release:
+        description: "Optional: also put the full build on this existing Release (e.g. v0.2.0)"
         required: false
         default: ""
-  push:
-    tags: ["v*"]
 
 permissions:
   contents: write
 
-env:
-  TAG: ${{ inputs.release_tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
-
 jobs:
   test:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      full: ${{ steps.v.outputs.full }}
+      major: ${{ steps.v.outputs.major }}
+      min_base: ${{ steps.v.outputs.min_base }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -30,23 +44,39 @@ jobs:
       - name: Tests
         env: {QT_QPA_PLATFORM: offscreen}
         run: python -m pytest -q
-      - name: Tag matches version
-        if: env.TAG != ''
+      - id: v
+        name: Version and build type
+        env: {INPUT_VERSION: "${{ inputs.version }}", FORCE: "${{ inputs.force_full }}"}
         run: |
-          v=$(python -c "import miniscope_gui; print(miniscope_gui.__version__)")
-          test "v$v" = "$TAG" || { echo "tag $TAG != version v$v"; exit 1; }
+          want="${INPUT_VERSION#v}"
+          have=$(python -c "import miniscope_gui; print(miniscope_gui.__version__)")
+          test "$want" = "$have" || { echo "input $want != __version__ $have"; exit 1; }
+          patch="${want##*.}"
+          min_base=$(tr -d '[:space:]' < packaging/min_base.txt)
+          major=false; [ $((patch % 10)) -eq 0 ] && major=true
+          full=$major; { [ "$FORCE" = "true" ] || [ "$min_base" = "$want" ]; } && full=true
+          echo "version=$want" >> "$GITHUB_OUTPUT"
+          echo "major=$major" >> "$GITHUB_OUTPUT"
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+          echo "min_base=$min_base" >> "$GITHUB_OUTPUT"
+          echo "version $want  full=$full  major=$major  min_base=$min_base"
 
   windows:
     needs: test
+    if: needs.test.outputs.full == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
       - run: python -m pip install . pyinstaller
+      - run: Set-Content -NoNewline -Encoding ascii base_version.txt "${{ needs.test.outputs.version }}"
+        shell: pwsh
       - name: Build
         run: >
           pyinstaller --noconfirm --clean --windowed --name MiniscopeAnalysis
+          --add-data "base_version.txt:."
+          --collect-submodules miniscope_gui
           --collect-submodules pyqtgraph --collect-data pyqtgraph
           --exclude-module numba --exclude-module llvmlite --exclude-module matplotlib
           --exclude-module tkinter packaging/launcher.py
@@ -58,16 +88,20 @@ jobs:
 
   macos:
     needs: test
+    if: needs.test.outputs.full == 'true'
     runs-on: macos-latest   # Apple silicon (arm64)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
       - run: python -m pip install . pyinstaller
+      - run: printf %s "${{ needs.test.outputs.version }}" > base_version.txt
       - name: Build .app
         run: |
           pyinstaller --noconfirm --clean --windowed --name MiniscopeAnalysis \
             --osx-bundle-identifier org.miniscope.analysis \
+            --add-data "base_version.txt:." \
+            --collect-submodules miniscope_gui \
             --collect-submodules pyqtgraph --collect-data pyqtgraph \
             --exclude-module numba --exclude-module llvmlite --exclude-module matplotlib \
             --exclude-module tkinter packaging/launcher.py
@@ -84,23 +118,67 @@ jobs:
             MiniscopeAnalysis-macOS-arm64.dmg
           retention-days: 30
 
-  release:
-    needs: [windows, macos]
-    if: (inputs.release_tag || '') != '' || startsWith(github.ref, 'refs/tags/')
+  publish:
+    needs: [test, windows, macos]
+    if: always() && needs.test.result == 'success' && (needs.test.outputs.full != 'true' || (needs.windows.result == 'success' && needs.macos.result == 'success'))
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.test.outputs.version }}
+      FULL: ${{ needs.test.outputs.full }}
+      MAJOR: ${{ needs.test.outputs.major }}
+      MIN_BASE: ${{ needs.test.outputs.min_base }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
+        if: needs.test.outputs.full == 'true'
         with: {path: assets, merge-multiple: true}
-      - name: Release notes from CHANGELOG.md
+      - name: Small update package and notes
         run: |
-          awk -v t="## $TAG" '$0==t{f=1;next} /^## /{f=0} f' CHANGELOG.md > notes.md
-          test -s notes.md || echo "MiniscopeAnalysis $TAG" > notes.md
+          zip -qr miniscope_gui-patch.zip miniscope_gui -x '*__pycache__*'
+          awk -v t="## v$VERSION" '$0==t{f=1;next} /^## /{f=0} f' CHANGELOG.md > notes.md
+          test -s notes.md || echo "MiniscopeAnalysis v$VERSION" > notes.md
           cat notes.md
-      - name: Publish
-        env: {GH_TOKEN: "${{ github.token }}"}
+      - name: Update channel
         run: |
-          gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --target "$GITHUB_SHA" --title "MiniscopeAnalysis $TAG" --notes-file notes.md
-          gh release edit "$TAG" --notes-file notes.md
-          gh release upload "$TAG" assets/* --clobber
+          gh release view updates >/dev/null 2>&1 || gh release create updates --prerelease \
+            --title "自动更新通道" --notes "软件内自动更新使用的文件，请不要手动下载。新用户请从最新的正式版本安装。"
+          gh release download updates -p latest.json -O old.json 2>/dev/null || echo '{}' > old.json
+          upload="miniscope_gui-patch.zip"
+          if [ "$FULL" = "true" ]; then upload="$upload assets/MiniscopeAnalysis-Windows.zip assets/MiniscopeAnalysis-macOS-arm64.zip"; fi
+          gh release upload updates $upload --clobber
+          python3 - <<'PY'
+          import json, os, subprocess
+          repo = os.environ["GITHUB_REPOSITORY"]; v = os.environ["VERSION"]
+          base = f"https://github.com/{repo}/releases/download/updates/"
+          old = json.load(open("old.json"))
+          size = lambda p: os.path.getsize(p)
+          m = {"version": v, "notes": open("notes.md", encoding="utf-8").read(),
+               "min_base": os.environ["MIN_BASE"],
+               "page": f"https://github.com/{repo}/releases/latest",
+               "patch": {"url": base + "miniscope_gui-patch.zip", "size": size("miniscope_gui-patch.zip")}}
+          if os.environ["FULL"] == "true":
+              m["full_version"] = v
+              m["full"] = {n: {"url": base + n, "size": size("assets/" + n)}
+                           for n in ("MiniscopeAnalysis-Windows.zip", "MiniscopeAnalysis-macOS-arm64.zip")}
+          else:
+              m["full_version"] = old.get("full_version", "0")
+              m["full"] = old.get("full", {})
+          json.dump(m, open("latest.json", "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+          print(json.dumps(m, ensure_ascii=False, indent=1))
+          PY
+          gh release upload updates latest.json --clobber
+      - name: Public release (every 10th version)
+        if: needs.test.outputs.major == 'true'
+        run: |
+          gh release view "v$VERSION" >/dev/null 2>&1 || \
+            gh release create "v$VERSION" --target "$GITHUB_SHA" --title "MiniscopeAnalysis v$VERSION" --notes-file notes.md --latest
+          gh release upload "v$VERSION" assets/* --clobber
+      - name: Also attach the full build to an existing Release
+        if: needs.test.outputs.full == 'true' && inputs.attach_to_release != ''
+        env: {TARGET: "${{ inputs.attach_to_release }}"}
+        run: |
+          gh release upload "$TARGET" assets/* --clobber
+          gh release view "$TARGET" --json body -q .body > body.md
+          printf '\n\n> 安装包已替换为 v%s 的构建（加入软件内小版本更新）。\n' "$VERSION" >> body.md
+          gh release edit "$TARGET" --notes-file body.md

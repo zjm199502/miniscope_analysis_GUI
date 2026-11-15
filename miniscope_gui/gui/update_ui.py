@@ -96,7 +96,7 @@ class UpdateManager(QObject):
         box.setWindowTitle("发现新版本")
         box.setText(f"有新版本 v{rel.version}（当前 v{__version__}）。")
         box.setInformativeText(notes)
-        can_auto = updater.install_root() is not None and rel.asset_url is not None
+        can_auto = updater.install_root() is not None and rel.asset_url is not None and rel.kind != "page"
         b_now = box.addButton("立即更新" if can_auto else "打开下载页面", QMessageBox.AcceptRole)
         b_skip = box.addButton("跳过这个版本", QMessageBox.RejectRole)
         box.addButton("以后再说", QMessageBox.RejectRole)
@@ -111,11 +111,14 @@ class UpdateManager(QObject):
 
     # -------------------------------------------------------------- install
     def _install(self, rel):
+        self._rel = rel
         if getattr(self.win, "thread", None) is not None:
             QMessageBox.information(self.win, "更新", "请等当前计算完成后再更新。")
             return
         self._cancel = False
         mb = rel.asset_size / 1e6 if rel.asset_size else 0
+        if rel.kind == "patch" and mb < 1:
+            mb = 0
         self._dlg = QProgressDialog(f"正在下载 v{rel.version}" + (f"（{mb:.0f} MB）" if mb else "") + "…",
                                     "取消", 0, 1000, self.win)
         self._dlg.setWindowTitle("更新")
@@ -147,12 +150,16 @@ class UpdateManager(QObject):
             if not isinstance(err, InterruptedError):
                 QMessageBox.warning(self.win, "更新失败", f"{err}\n\n可以到发布页面手动下载：\n{updater.RELEASES_PAGE}")
             return
-        if QMessageBox.question(self.win, "更新",
-                                "新版本已下载。软件将关闭并自动重新打开，大约需要半分钟。\n"
-                                "你的分析结果保存在输出文件夹里，不受影响。现在更新吗？") != QMessageBox.Yes:
+        small = getattr(self, "_rel", None) is not None and self._rel.kind == "patch"
+        msg = ("更新已安装，重新打开软件后生效。现在重新打开吗？\n" if small else
+               "新版本已下载。软件将关闭并自动重新打开，大约需要半分钟。\n现在更新吗？\n")
+        if QMessageBox.question(self.win, "更新", msg + "你的分析结果保存在输出文件夹里，不受影响。") != QMessageBox.Yes:
             return
         try:
-            updater.launch_installer(new_dir)
+            if small:
+                updater.restart_app()
+            else:
+                updater.launch_installer(new_dir)
         except Exception as e:
             QMessageBox.warning(self.win, "更新失败", str(e))
             return
