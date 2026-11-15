@@ -1,0 +1,81 @@
+"""Step 4: background removal.
+
+1-photon movies contain bright, blurry out-of-focus fluorescence. Each frame
+is denoised with a small median filter and the background is removed with a
+morphological white top-hat (frame minus its opening with a disk larger than
+a cell). Bright objects smaller than the disk (cell bodies) are kept; larger
+structures and the smooth glow are removed. This is the approach used by
+MiniAn.
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from typing import Callable
+
+import cv2
+import numpy as np
+
+from .storage import MovieWriter
+from .workspace import Workspace
+
+BG_FILE = "movie_bg.npy"
+
+
+@dataclass
+class BackgroundParams:
+    median_ksize: int = 3        # odd; 1 = off
+    cell_diameter: int = 10      # pixels in the processed movie; disk radius ~ diameter
+    source: str = "motion"       # "motion" (corrected) or "preprocess"
+
+
+def disk(radius: int) -> np.ndarray:
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
+
+
+def remove_background(frame: np.ndarray, p: BackgroundParams, kernel=None) -> np.ndarray:
+    f = frame
+    if p.median_ksize > 1:
+        f = cv2.medianBlur(f, int(p.median_ksize) | 1)
+    if kernel is None:
+        kernel = disk(max(1, int(p.cell_diameter)))
+    return cv2.morphologyEx(f, cv2.MORPH_TOPHAT, kernel)
+
+
+def source_movie(ws: Workspace, source: str):
+    from .motion import MC_FILE
+    from .preprocess import MOVIE_FILE
+    if source == "motion" and ws.path(MC_FILE).exists():
+        return np.load(ws.path(MC_FILE), mmap_mode="r")
+    return np.load(ws.path(MOVIE_FILE), mmap_mode="r")
+
+
+def run_background(session, ws: Workspace, p: BackgroundParams,
+                   progress: Callable[[float, str], None] | None = None,
+                   should_stop: Callable[[], bool] | None = None) -> dict:
+    progress = progress or (lambda f, m: None)
+    should_stop = should_stop or (lambda: False)
+    movie = source_movie(ws, p.source)
+    T, H, W = movie.shape
+    kernel = disk(max(1, int(p.cell_diameter)))
+    max_img = np.zeros((H, W), np.uint8)
+    sum_img = np.zeros((H, W), np.float64)
+    with MovieWriter(ws.path(BG_FILE), (T, H, W)) as out:
+        for t in range(T):
+            if should_stop():
+                raise InterruptedError("已取消")
+            f = remove_background(np.asarray(movie[t]), p, kernel)
+            out.write(f[None])
+            np.maximum(max_img, f, out=max_img)
+            sum_img += f
+            if t % 200 == 0 or t == T - 1:
+                progress((t + 1) / T, f"去除背景 {t + 1}/{T} 帧")
+    np.save(ws.path("bg_max.npy"), max_img.astype(np.float32))
+    np.save(ws.path("bg_mean.npy"), (sum_img / T).astype(np.float32))
+    ws.record_step("background", asdict(p), {"movie": BG_FILE})
+    progress(1.0, "去除背景完成")
+    return {"movie": BG_FILE}
+
+
+def load_bg_movie(ws: Workspace):
+    return np.load(ws.path(BG_FILE), mmap_mode="r")

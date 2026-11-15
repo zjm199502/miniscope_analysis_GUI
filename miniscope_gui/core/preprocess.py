@@ -13,6 +13,7 @@ from typing import Callable
 import numpy as np
 
 from ..io.ucla_v4 import MiniscopeSession
+from .storage import MovieWriter
 from .workspace import Workspace
 
 MOVIE_FILE = "movie_pre.npy"
@@ -106,13 +107,6 @@ def run_preprocess(session: MiniscopeSession, ws: Workspace, p: PreprocessParams
     H, W = output_shape(session, p)
     x, y, w, h = p.crop if p.crop else (0, 0, session.width, session.height)
 
-    # Write the .npy header once, then append frames with plain file writes.
-    # Unlike a writable memmap this keeps no growing page cache attributed to
-    # the process (Windows counts dirty mapped pages as process memory).
-    from numpy.lib.format import open_memmap
-    mm = open_memmap(ws.path(MOVIE_FILE), mode="w+", dtype=np.uint8, shape=(n_out, H, W))
-    header_len = mm.offset
-    del mm
     times_all = session.frame_times_s()
     times = times_all[start:stop].reshape(n_out, tb).mean(axis=1)
 
@@ -125,26 +119,25 @@ def run_preprocess(session: MiniscopeSession, ws: Workspace, p: PreprocessParams
     buf = np.empty((chunk, H, W), np.float32)
     nbuf = 0
     out_i = 0
-    with open(ws.path(MOVIE_FILE), "r+b") as fh:
-        fh.seek(header_len)
+    with MovieWriter(ws.path(MOVIE_FILE), (n_out, H, W)) as writer:
         for idx, frame in session.iter_frames(start, stop):
             if should_stop():
                 raise InterruptedError("已取消")
             buf[nbuf] = bin_spatial(frame[None, y:y + h, x:x + w], p.spatial_bin)[0][:H, :W]
             nbuf += 1
             if nbuf == chunk or idx == stop - 1:
+                if idx == stop - 1 and out_i + nbuf // tb != n_out:
+                    raise IOError(f"只读到 {out_i + nbuf // tb}/{n_out} 帧，视频文件可能损坏")
                 nb = nbuf // tb
                 block = buf[:nb * tb].reshape(nb, tb, H, W).mean(axis=1)
                 sum_img += block.sum(axis=0)
                 np.maximum(max_img, block.max(axis=0), out=max_img)
                 np.rint(block, out=block)
                 np.clip(block, 0, 255, out=block)
-                fh.write(block.astype(np.uint8).tobytes())
+                writer.write(block.astype(np.uint8))
                 out_i += nb
                 nbuf = 0
                 progress(out_i / n_out, f"预处理 {out_i}/{n_out} 帧")
-    if out_i != n_out:
-        raise IOError(f"只读到 {out_i}/{n_out} 帧，视频文件可能损坏")
 
     np.save(ws.path(TIMES_FILE), times)
     np.save(ws.path(MEAN_FILE), (sum_img / max(out_i, 1)).astype(np.float32))

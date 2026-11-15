@@ -1,6 +1,6 @@
 """Run long computations off the GUI thread."""
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, Qt, QThread, Signal
 
 
 class Worker(QObject):
@@ -34,7 +34,9 @@ def start_worker(parent, fn, *args, **kwargs):
     worker = Worker(fn, *args, **kwargs)
     worker.moveToThread(thread)
     thread.started.connect(worker.run)
-    worker.finished.connect(thread.quit)
-    worker.failed.connect(thread.quit)
+    # direct: quit the thread's loop as soon as the work ends, without waiting
+    # for the GUI event loop (the QThread object itself lives in the GUI thread)
+    worker.finished.connect(thread.quit, Qt.DirectConnection)
+    worker.failed.connect(thread.quit, Qt.DirectConnection)
     thread.finished.connect(worker.deleteLater)
     return thread, worker
