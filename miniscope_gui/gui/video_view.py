@@ -48,6 +48,7 @@ class VideoView(QWidget):
         self.play_btn.clicked.connect(self.toggle_play)
         self.slider.valueChanged.connect(self._show)
 
+        self._overlays = []
         self._get = None
         self._n = 0
         self._fps = 30.0
@@ -55,8 +56,14 @@ class VideoView(QWidget):
         self._set_controls(False)
 
     # ----------------------------------------------------------------- API
+    def _reset_look(self):
+        self.img.resetTransform()
+        self.vb.setAspectLocked(True)
+        self.hist.gradient.loadPreset("grey")
+
     def set_movie(self, get_frame, n_frames: int, fps: float, title: str = ""):
         self.stop()
+        self._reset_look()
         self._get, self._n, self._fps = get_frame, n_frames, fps
         self._levels_set = False
         self.title.setText(title)
@@ -70,12 +77,22 @@ class VideoView(QWidget):
 
     def set_image(self, image: np.ndarray, title: str = ""):
         self.stop()
+        self._reset_look()
         self._get = None
         self._set_controls(False)
         self.title.setText(title)
         self.img.setImage(image, autoLevels=True)
         self.time_lbl.setText("")
         self.vb.autoRange()
+
+    def add_overlay(self, item):
+        self.vb.addItem(item)
+        self._overlays.append(item)
+
+    def clear_overlays(self):
+        for it in self._overlays:
+            self.vb.removeItem(it)
+        self._overlays = []
 
     def current_index(self) -> int:
         return self.slider.value()

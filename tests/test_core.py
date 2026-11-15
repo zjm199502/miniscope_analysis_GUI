@@ -95,3 +95,32 @@ def test_preprocess_memory_is_bounded(tmp_path):
     # on chunk size (50 binned frames = 8 MB float32), not on movie length
     assert peak < 40e6, peak  # measured ~25 MB for both 300 and 900 frames
     assert load_movie(ws).shape == (600, 200, 200)
+
+
+def test_preprocess_circle_fov(tmp_path, session):
+    s, _ = session
+    ws = Workspace.create_or_open(tmp_path / "out", source_folder=s.folder)
+    p = PreprocessParams(fov_circle=(40.0, 32.0, 20.0), spatial_bin=2)
+    run_preprocess(s, ws, p)
+    mov = load_movie(ws)
+    assert mov.shape[1:] == (20, 20)  # 40x40 bounding box, binned by 2
+    mask = np.load(ws.path("fov_mask.npy"))
+    assert mask.shape == (20, 20)
+    assert mask[10, 10] and not mask[0, 0]
+    assert list(ws.step("preprocess")["params"]["crop"]) == [20, 12, 40, 40]
+
+
+def test_movie_reader(tmp_path):
+    from miniscope_gui.core.storage import MovieReader, MovieWriter
+    arr = np.random.default_rng(0).normal(size=(7, 5, 4)).astype(np.float16)
+    with MovieWriter(tmp_path / "m.npy", arr.shape, np.float16) as w:
+        w.write(arr[:3]); w.write(arr[3:])
+    r = MovieReader(tmp_path / "m.npy")
+    assert r.shape == arr.shape and r.dtype == np.float16
+    np.testing.assert_array_equal(r[2], arr[2])
+    np.testing.assert_array_equal(r[-1], arr[-1])
+    np.testing.assert_array_equal(r[1:5], arr[1:5])
+    np.testing.assert_array_equal(r[5:100], arr[5:])
+    np.testing.assert_array_equal(r[:, 1:3, 2], arr[:, 1:3, 2])
+    np.testing.assert_array_equal(np.asarray(r), arr)
+    np.testing.assert_array_equal(np.load(tmp_path / "m.npy"), arr)

@@ -1,0 +1,42 @@
+name: Build macOS app (Apple silicon)
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: macos-14   # Apple silicon (arm64)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . pyinstaller pytest
+      - name: Tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+      - name: Build .app
+        run: |
+          pyinstaller --noconfirm --clean --windowed --name MiniscopeAnalysis \
+            --osx-bundle-identifier org.miniscope.analysis \
+            --collect-submodules pyqtgraph --collect-data pyqtgraph \
+            --exclude-module numba --exclude-module llvmlite --exclude-module matplotlib \
+            --exclude-module tkinter \
+            packaging/launcher.py
+      - name: Make .dmg
+        run: |
+          mkdir -p dmg
+          cp -R dist/MiniscopeAnalysis.app dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname MiniscopeAnalysis -srcfolder dmg -ov -format UDZO MiniscopeAnalysis-macOS-arm64.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MiniscopeAnalysis-macOS-arm64
+          path: MiniscopeAnalysis-macOS-arm64.dmg
+          retention-days: 30
