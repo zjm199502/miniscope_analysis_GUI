@@ -101,15 +101,48 @@ def noise_std(x: np.ndarray) -> float:
     return float(max(s_diff, s_low))
 
 
-def estimate_g(x: np.ndarray, g_lo: float, g_hi: float) -> float:
-    """AR(1) coefficient from the autocovariance (lags 1 and 2 are unaffected by white noise)."""
-    x = x - x.mean()
+def estimate_g(x: np.ndarray, g_lo: float, g_hi: float, g0: float | None = None,
+               sn: float | None = None) -> float:
+    """Per-cell AR(1) coefficient from the decay of isolated, clear transients.
+
+    For each large peak (> 5 noise) that is not followed by a larger one within
+    3 indicator time constants, fit log(y) against time on the falling phase
+    (samples above 30 % of the peak). The median of the fitted decays is used.
+    The autocovariance estimate is only a fallback: slow baseline wobble biases it
+    towards long decays. Result clipped to [g_lo, g_hi].
+    """
+    g0 = float(np.clip(g0 if g0 else np.sqrt(g_lo * g_hi), g_lo, g_hi))
     n = len(x)
     if n < 10:
-        return float(np.clip(0.9, g_lo, g_hi))
+        return g0
+    if sn is None:
+        sn = noise_std(x)
+    tau0 = -1.0 / np.log(g0)                     # in frames
+    look = max(3, int(round(3 * tau0)))
+    xs = ndimage.uniform_filter1d(x.astype(np.float64), 3)
+    thr = 5 * max(sn, 1e-12)
+    cand = np.flatnonzero((xs[1:-1] > thr) & (xs[1:-1] >= xs[:-2]) & (xs[1:-1] >= xs[2:])) + 1
+    rates = []
+    for i in cand[np.argsort(-xs[cand])][:50]:
+        seg = xs[i:min(n, i + look + 1)]
+        if len(seg) < 4 or seg[1:].max() > seg[0]:
+            continue                             # another, larger event follows
+        stop = np.flatnonzero(seg < 0.3 * seg[0])
+        m = int(stop[0]) if len(stop) else len(seg)
+        if m < 3:
+            continue
+        y = np.log(seg[:m])
+        t = np.arange(m)
+        slope = np.polyfit(t, y, 1)[0]
+        if slope < 0:
+            rates.append(-slope)
+    if len(rates) >= 3:
+        return float(np.clip(np.exp(-np.median(rates)), g_lo, g_hi))
+    # fallback: autocovariance (lags 1 and 2 are unaffected by white noise)
+    x = x - x.mean()
     a1 = float(x[1:] @ x[:-1]) / (n - 1)
     a2 = float(x[2:] @ x[:-2]) / (n - 2)
-    g = a2 / a1 if a1 > 0 else g_lo
+    g = a2 / a1 if a1 > 0 else g0
     return float(np.clip(g, g_lo, g_hi))
 
 
@@ -168,7 +201,7 @@ def compute_signals(raw, F_local, fps, p: SignalParams):
         if sn <= 0:   # degenerate (e.g. constant) trace: fall back to plain std
             sn = float(np.std(x)) or 1e-6
         noise[k] = sn
-        gk = estimate_g(x, g_lo, g_hi) if p.auto_tau else g
+        gk = estimate_g(x, g_lo, g_hi, g, sn) if p.auto_tau else g
         taus[k] = -1.0 / (fps * np.log(gk))
         c, s = oasis_ar1(x, gk, p.spike_threshold * sn)
         denoised[k] = c

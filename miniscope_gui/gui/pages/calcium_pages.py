@@ -54,11 +54,33 @@ class BackgroundPage(StepPage):
     results_hint = "最大投影上应该能看到很多清晰、分开的亮点，每个亮点就是一个细胞。"
 
     def build_params(self):
-        self.diam = self.add_param("细胞直径", self.spin(3, 60, 10, suffix=" 像素"),
-                                   "预处理后画面里一个细胞大约多宽。可以在最大投影上量一下："
-                                   "608×608 原始画面、空间降采样 2 时，通常是 6–12 像素。")
+        self.diam = self.add_param("细胞直径", self.spin(3, 60, 8, suffix=" 像素"),
+                                   "预处理后画面里一个细胞大约多宽。点下面的「自动估计」，"
+                                   "软件会在运动校正后的最大投影上测量亮点的大小。"
+                                   "空间降采样 2 时通常是 6–10 像素。宁可偏小也不要偏大：偏大会漏掉挨得近的细胞。")
+        self.est_btn = QPushButton("自动估计细胞直径")
+        self.est_btn.clicked.connect(self._estimate)
+        self.form.addRow(self.est_btn)
         self.median = self.add_param("去噪强度", self.combo(["关闭", "3", "5"], "3"),
                                      "中值滤波窗口，3 适合大多数数据。")
+
+    def _estimate(self):
+        import numpy as np
+        from ...core.cellsize import estimate_cell_diameter
+        from ...core.preprocess import MASK_FILE
+        if not (self.ws and self.ws.path("mc_max.npy").exists()):
+            QMessageBox.information(self, "提示", "请先完成第 3 步运动校正。")
+            return
+        img = np.load(self.ws.path("mc_max.npy")).astype(np.float32) - np.load(self.ws.path("mc_mean.npy"))
+        mask = np.load(self.ws.path(MASK_FILE)) if self.ws.path(MASK_FILE).exists() else None
+        if mask is not None and mask.shape != img.shape:
+            mask = None
+        d = estimate_cell_diameter(img, mask)
+        if d is None:
+            QMessageBox.information(self, "提示", "没有找到足够清楚的亮点，请手动设置细胞直径。")
+            return
+        self.diam.setValue(int(round(d)))
+        self.status.setText(f"估计的细胞直径约 {d:.1f} 像素，已填入。")
 
     def params(self):
         m = self.median.currentText()
@@ -78,7 +100,7 @@ class ExtractionPage(StepPage):
     results = (("cells", "检查细胞"), ("cn", "相关图"), ("pnr", "PNR 图"), ("bg_max", "最大投影"))
 
     def build_params(self):
-        self.diam = self.add_param("细胞直径", self.spin(3, 60, 10, suffix=" 像素"),
+        self.diam = self.add_param("细胞直径", self.spin(3, 60, 8, suffix=" 像素"),
                                    "和上一步保持一致。")
         self.min_corr = self.add_param("最小相关", self.dspin(0.3, 0.99, 0.8, 0.05),
                                        "候选细胞中心与周围像素的相关系数下限。漏掉细胞时调低（如 0.7），"

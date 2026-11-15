@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "miniscope-gui"
-version = "0.1.0"
+version = "0.2.0"
 description = "Lightweight miniscope 1-photon calcium imaging and behavior analysis GUI"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,6 +15,7 @@ dependencies = [
     "PySide6>=6.5",
     "pyqtgraph>=0.13.3",
     "openpyxl>=3.1",
+    "certifi",
 ]
 
 [project.optional-dependencies]

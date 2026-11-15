@@ -96,6 +96,8 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.progress)
         self.statusBar().addPermanentWidget(self.cancel_btn)
         self.statusBar().showMessage("第一步：选择 Miniscope 文件夹和一个空的输出文件夹")
+        from .update_ui import UpdateManager
+        self.updates = UpdateManager(self)
 
         self.steps.currentRowChanged.connect(self._on_step_changed)
         self.steps.setCurrentRow(0)

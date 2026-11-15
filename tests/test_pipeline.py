@@ -100,7 +100,12 @@ def test_signals_slow_cell_and_flat_baseline():
     n_slow = int((res["spikes"][0] > 0).sum())
     assert n_slow <= 2 * n_true + 2, (n_slow, n_true)
     assert int((res["spikes"][1] > 0).sum()) <= 3      # flat trace: (almost) no events
-    assert res["taus"][0] > 1.0
+    assert 2.0 < res["taus"][0] < 4.0, res["taus"]
+    # a normal GCaMP6f cell on the same slow wobble keeps a GCaMP6f-like decay
+    c_fast, _ = calcium(0.7, 0.1)
+    raw2 = (10 * c_fast + rng.normal(0, 0.5, T) + 0.3 * np.sin(np.arange(T) / 200.0))[None]
+    res2 = compute_signals(raw2.astype(np.float32), F[:1], fps, SignalParams(indicator="GCaMP6f"))
+    assert 0.45 < res2["taus"][0] < 1.1, res2["taus"]
 
 
 def test_suspect_cells():
@@ -111,5 +116,16 @@ def test_suspect_cells():
     round_ = ((yy - 20) ** 2 + (xx - 20) ** 2 <= 16).astype(float)        # normal cell, d ~ 8
     long_ = ((abs(yy - 45) <= 1) & (abs(xx - 30) <= 15)).astype(float)    # vessel-like
     big = ((yy - 30) ** 2 + (xx - 45) ** 2 <= 144).astype(float)          # far too large
-    A = sp.csc_matrix(np.stack([round_.ravel(), long_.ravel(), big.ravel()], 1))
-    assert suspect_cells(A, (H, W), 8).tolist() == [False, True, True]
+    piece = ((yy - 30) ** 2 + (xx - 30) ** 2 <= 9).astype(float)          # touches the big one
+    A = sp.csc_matrix(np.stack([round_.ravel(), long_.ravel(), big.ravel(), piece.ravel()], 1))
+    assert suspect_cells(A, (H, W), 8).tolist() == [False, True, True, True]
+
+
+def test_estimate_cell_diameter():
+    from miniscope_gui.core.cellsize import estimate_cell_diameter
+    rng = np.random.default_rng(0)
+    for r in (2.0, 3.5):
+        movie, gt = make_movie(T=600, H=160, W=160, n_cells=30, cell_radius=r, seed=5, noise=4)
+        img = movie.max(0).astype(np.float32) - movie.mean(0)
+        d = estimate_cell_diameter(img)
+        assert d is not None and abs(d - 2 * np.sqrt(2) * r) < 0.2 * 2 * np.sqrt(2) * r, (r, d)

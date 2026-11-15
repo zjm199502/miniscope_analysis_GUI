@@ -26,7 +26,7 @@ BG_FILE = "movie_bg.npy"
 @dataclass
 class BackgroundParams:
     median_ksize: int = 3        # odd; 1 = off
-    cell_diameter: int = 10      # pixels in the processed movie; disk radius ~ diameter
+    cell_diameter: int = 8      # pixels in the processed movie; disk radius ~ diameter
     source: str = "motion"       # "motion" (corrected) or "preprocess"
 
 
