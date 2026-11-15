@@ -46,6 +46,7 @@ class ExtractionParams:
     max_cells: int = 1000
     merge_threshold: float = 0.8  # temporal correlation for merging overlapping cells
     n_iterations: int = 2
+    residual_pass: bool = True    # second search for cells in the unexplained residual
     min_area_fraction: float = 0.15   # of a disk with the cell diameter
     chunk_frames: int = 200
 
@@ -222,6 +223,88 @@ def _build_sparse(patches: _Patches, a_list, npix):
                          shape=(npix, len(a_list)), dtype=np.float32)
 
 
+class _Residual:
+    """Movie minus the current model (cells + offset), read chunk by chunk."""
+
+    def __init__(self, Y, A, C, b0):
+        self.Y, self.A, self.C, self.b0 = Y, A.tocsr(), C, b0
+        self.shape = Y.shape
+
+    def __getitem__(self, sl):
+        a, b, _ = sl.indices(self.shape[0])
+        T_, H, W = b - a, self.shape[1], self.shape[2]
+        blk = np.asarray(self.Y[a:b], np.float32).reshape(T_, -1)
+        blk -= (self.A @ self.C[:, a:b]).T.astype(np.float32)
+        blk -= self.b0[None, :]
+        return blk.reshape(T_, H, W)
+
+
+def _init_cells(Y, seeds, H, W, R, chunk, progress, should_stop, f0, df):
+    """Initial footprints: correlation of each patch pixel with the seed's trace."""
+    T = Y.shape[0]
+    npix = H * W
+    K = len(seeds)
+    patches = _Patches(seeds, H, W, R)
+    C = np.zeros((K, T), np.float32)
+    ys, xs = seeds[:, 0], seeds[:, 1]
+    pix_s1 = np.zeros(npix); pix_s2 = np.zeros(npix)
+    yc = [np.zeros(len(ix)) for ix in patches.idx]
+    for a, b in _chunks(T, chunk):
+        if should_stop():
+            raise InterruptedError("已取消")
+        blk = np.asarray(Y[a:b]).astype(np.float32)
+        Ys = _smooth(blk, 1.0)
+        C[:, a:b] = Ys[:, ys, xs].T
+        flat = blk.reshape(b - a, -1).astype(np.float64)
+        pix_s1 += flat.sum(0); pix_s2 += (flat ** 2).sum(0)
+        for k in range(K):
+            yc[k] += patches.take(k, blk).T.astype(np.float64) @ C[k, a:b].astype(np.float64)
+        progress(f0 + df * b / T, f"初始化细胞形状 {b}/{T}")
+    ybar = pix_s1 / T
+    ystd = np.sqrt(np.maximum(pix_s2 / T - ybar ** 2, 1e-12))
+    a_list = []
+    for k in range(K):
+        c = C[k].astype(np.float64)
+        cbar, cvar = c.mean(), c.var()
+        idx = patches.idx[k]
+        cov = yc[k] / T - ybar[idx] * cbar
+        corr = cov / (ystd[idx] * np.sqrt(max(cvar, 1e-12)))
+        a = np.where(corr > 0.3, cov / max(cvar, 1e-12), 0.0)
+        a_list.append(_clean_footprint(a, patches.boxes[k], seeds[k]))
+    keep = [k for k in range(K) if a_list[k].sum() > 0]
+    seeds = seeds[keep].reshape(-1, 2)
+    a_list, C = [a_list[k] for k in keep], C[keep]
+    A = _build_sparse(_Patches(seeds, H, W, R), a_list, npix)
+    return seeds, A, C, ybar
+
+
+def _distinct_new(A, C, n_old, H, W, diameter, max_corr=0.5):
+    """Keep all old cells, and new cells whose activity differs from every old cell
+    within one diameter."""
+    K = A.shape[1]
+    keep = np.ones(K, bool)
+    if K == n_old or n_old == 0:
+        return keep
+    cen = _centroids(A, H, W)
+    Cz = C - C.mean(1, keepdims=True)
+    Cz /= np.maximum(np.linalg.norm(Cz, axis=1, keepdims=True), 1e-12)
+    for j in range(n_old, K):
+        d = np.hypot(cen[:n_old, 0] - cen[j, 0], cen[:n_old, 1] - cen[j, 1])
+        near = np.flatnonzero(d < diameter)
+        if C[j].max() <= 0 or (len(near) and (Cz[near] @ Cz[j]).max() > max_corr):
+            keep[j] = False
+    return keep
+
+
+def _refine(Y, A, C, b0, ybar, patches, seeds, chunk, p, H, W, progress, should_stop, f0, df, label):
+    C, b0 = _update_C(Y, A, C, b0, ybar, chunk, progress, should_stop, f0, df / 2, f"{label} 更新活动")
+    A, patches, C, seeds = _update_A(Y, A, C, b0, patches, seeds, chunk, p, progress, should_stop,
+                                     f0 + df / 2, df / 2, f"{label} 更新形状")
+    A, C, seeds, patches = _merge(A, C, seeds, patches, p, H, W)
+    b0 = (ybar - A @ C.mean(1)).astype(np.float32)
+    return A, C, b0, seeds, patches
+
+
 # ------------------------------------------------------------------ main run
 def run_extraction(session, ws: Workspace, p: ExtractionParams,
                    progress: Callable[[float, str], None] | None = None,
@@ -252,52 +335,50 @@ def run_extraction(session, ws: Workspace, p: ExtractionParams,
     progress(0.27, f"找到 {K} 个候选细胞")
     if K == 0:
         raise ValueError("没有找到符合条件的细胞。可以降低「最小相关」或「最小 PNR」再试。")
-    R = int(np.ceil(1.5 * p.cell_diameter))   # patch half-width: room for the whole cell
-    patches = _Patches(seeds, H, W, R)
 
-    # 3. init: seed traces + correlation of each patch pixel with its seed trace
-    C = np.zeros((K, T), np.float32)
-    ys, xs = seeds[:, 0], seeds[:, 1]
-    pix_s1 = np.zeros(npix); pix_s2 = np.zeros(npix)
-    yc = [np.zeros(len(ix)) for ix in patches.idx]
-    for a, b in _chunks(T, chunk):
-        if should_stop():
-            raise InterruptedError("已取消")
-        blk = np.asarray(Y[a:b]).astype(np.float32)
-        Ys = _smooth(blk, 1.0)
-        C[:, a:b] = Ys[:, ys, xs].T
-        flat = blk.reshape(b - a, -1).astype(np.float64)
-        pix_s1 += flat.sum(0); pix_s2 += (flat ** 2).sum(0)
-        for k in range(K):
-            yc[k] += patches.take(k, blk).T.astype(np.float64) @ C[k, a:b].astype(np.float64)
-        progress(0.27 + 0.13 * b / T, f"初始化细胞形状 {b}/{T}")
-    ybar = pix_s1 / T
-    ystd = np.sqrt(np.maximum(pix_s2 / T - ybar ** 2, 1e-12))
-    a_list = []
-    for k in range(K):
-        c = C[k].astype(np.float64)
-        cbar, cvar = c.mean(), c.var()
-        idx = patches.idx[k]
-        cov = yc[k] / T - ybar[idx] * cbar
-        corr = cov / (ystd[idx] * np.sqrt(max(cvar, 1e-12)))
-        a = np.where(corr > 0.3, cov / max(cvar, 1e-12), 0.0)
-        a_list.append(_clean_footprint(a, patches.boxes[k], seeds[k]))
-    keep = [k for k in range(K) if a_list[k].sum() > 0]
-    seeds, a_list, C = seeds[keep], [a_list[k] for k in keep], C[keep]
+    # 3. init
+    R = int(np.ceil(1.5 * p.cell_diameter))   # patch half-width: room for the whole cell
+    seeds, A, C, ybar = _init_cells(Y, seeds, H, W, R, chunk, progress, should_stop, 0.27, 0.10)
     patches = _Patches(seeds, H, W, R)
-    A = _build_sparse(patches, a_list, npix)
     b0 = ybar.astype(np.float32)  # offset, refined below
 
     # 4. alternate C and A updates
     n_it = max(1, int(p.n_iterations))
     for it in range(n_it):
-        C, b0 = _update_C(Y, A, C, b0, ybar, chunk, progress, should_stop,
-                          0.40 + 0.45 * it / n_it, 0.45 / n_it / 2, f"第 {it + 1} 轮 更新活动")
-        A, patches, C, seeds = _update_A(Y, A, C, b0, patches, seeds, chunk, p, progress, should_stop,
-                                         0.40 + 0.45 * (it + 0.5) / n_it, 0.45 / n_it / 2,
-                                         f"第 {it + 1} 轮 更新形状")
-        A, C, seeds, patches = _merge(A, C, seeds, patches, p, H, W)
-        b0 = (ybar - A @ C.mean(1)).astype(np.float32)
+        A, C, b0, seeds, patches = _refine(Y, A, C, b0, ybar, patches, seeds, chunk, p, H, W,
+                                           progress, should_stop, 0.37 + 0.30 * it / n_it,
+                                           0.30 / n_it, f"第 {it + 1} 轮")
+
+    # 4b. look again in what the cells found so far do not explain: dim cells
+    #     next to bright ones are hidden in the first summary images
+    if p.residual_pass and len(C):
+        res = _Residual(Y, A, C, b0)
+        cn2, pnr2, _, _ = summary_images(res, sigma, chunk,
+                                         lambda f, m: progress(0.67 + 0.08 * f / 0.25, "在残差中寻找遗漏的细胞"),
+                                         should_stop, mask)
+        new = find_seeds(cn2, pnr2, p, mask)
+        if len(new):
+            cen = _centroids(A, H, W)
+            d = np.hypot(new[:, None, 0] - cen[None, :, 0], new[:, None, 1] - cen[None, :, 1])
+            new = new[d.min(1) >= 0.5 * p.cell_diameter]
+        if len(new):
+            new, A2, C2, _ = _init_cells(res, new, H, W, R, chunk,
+                                         lambda f, m: progress(f, "初始化新增的细胞"), should_stop, 0.75, 0.04)
+            if len(new):
+                n_old = A.shape[1]
+                A = sp.hstack([A, A2]).tocsc().astype(np.float32)
+                C = np.vstack([C, C2]).astype(np.float32)
+                seeds = np.vstack([seeds, new])
+                patches = _Patches(seeds, H, W, R)
+                C, b0 = _update_C(Y, A, C, b0, ybar, chunk, progress, should_stop, 0.79, 0.03, "补充细胞后 更新活动")
+                # a new cell must not just be a leftover of an old neighbour
+                keep = _distinct_new(A, C, n_old, H, W, p.cell_diameter)
+                A, C, seeds = A[:, keep], C[keep], seeds[keep]
+                patches = _Patches(seeds, H, W, R)
+                new = new[: int(keep.sum()) - n_old]
+                A, C, b0, seeds, patches = _refine(Y, A, C, b0, ybar, patches, seeds, chunk, p, H, W,
+                                                   progress, should_stop, 0.82, 0.04, "补充细胞后")
+        progress(0.86, f"残差中新增 {len(new)} 个候选细胞")
 
     # 5. final traces + raw traces + local fluorescence for dF/F
     C, b0, raw, F_local = _final_traces(ws, Y, A, C, b0, ybar, chunk, progress, should_stop)
@@ -400,6 +481,11 @@ def _merge(A, C, seeds, patches, p, H, W):
     frac = inter / np.maximum(np.minimum.outer(sizes, sizes), 1)
     np.fill_diagonal(frac, 0)
     pairs |= (frac > 0.3) & (corr > 0.5)
+    # duplicates of one cell: centres closer than ~0.75 cell diameter with very similar activity
+    cen = _centroids(A, H, W)
+    dist = np.hypot(cen[:, None, 0] - cen[None, :, 0], cen[:, None, 1] - cen[None, :, 1])
+    np.fill_diagonal(dist, np.inf)
+    pairs |= (dist < 0.75 * p.cell_diameter) & (corr > 0.7)
     if not pairs.any():
         return A, C, seeds, patches
     lab_n, labels = sp.csgraph.connected_components(sp.csr_matrix(pairs), directed=False)
