@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "miniscope-gui"
-version = "0.2.6"
+version = "0.2.7"
 description = "Lightweight miniscope 1-photon calcium imaging and behavior analysis GUI"
 readme = "README.md"
 requires-python = ">=3.10"

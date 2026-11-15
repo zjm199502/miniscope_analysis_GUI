@@ -116,7 +116,24 @@ class ExtractionPage(StepPage):
         self.review_info.setWordWrap(True)
         self.lay.addWidget(self.review_info)
         self.lay.addWidget(hint("在「检查细胞」视图中：点击细胞查看它的活动曲线；"
-                                "按住 Ctrl 点击可以多选。绿色 = 保留，红色 = 删除，橙色 = 形状可疑（过大或过长，可能是血管或几个细胞连在一起）。"))
+                                "按住 Ctrl 点击可以多选。绿色 = 保留，红色 = 删除，橙色 = 形状可疑（过大或过长，可能是血管或几个细胞连在一起），"
+                                "蓝色虚线 = 低置信候选（质量分低于下面的阈值）。"
+                                "提取时宁多勿漏：拿不准的候选也会列出来，删除比补漏容易得多。"))
+        qrow = QHBoxLayout()
+        qrow.addWidget(QLabel("质量分阈值"))
+        self.q_thr = self.spin(0, 100, 60)
+        self.q_thr.setToolTip("质量分 0–100，综合相关性、信噪比、大小、圆度，以及活动是否只是邻近细胞的回声。"
+                              "低于阈值的候选显示为蓝色虚线。")
+        qrow.addWidget(self.q_thr)
+        self.reject_low_btn = QPushButton("删除低于阈值的候选")
+        qrow.addWidget(self.reject_low_btn)
+        self.lay.addLayout(qrow)
+        qrow2 = QHBoxLayout()
+        self.by_quality = self.check("「上一个 / 下一个」按质量分从低到高", True)
+        qrow2.addWidget(self.by_quality)
+        self.restore_btn = QPushButton("全部恢复")
+        qrow2.addWidget(self.restore_btn)
+        self.lay.addLayout(qrow2)
         row = QHBoxLayout()
         self.toggle_btn = QPushButton("删除 / 恢复所选")
         self.merge_btn = QPushButton("合并所选")
@@ -150,7 +167,9 @@ class ExtractionPage(StepPage):
             self.diam.setValue(int(st["params"].get("cell_diameter", 10)))
 
     def on_finished(self, result):
-        self.status.setText(f"✓ 找到 {result['n_cells']} 个细胞")
+        n_low = result.get("n_low_quality", 0)
+        self.status.setText(f"✓ 找到 {result['n_cells']} 个候选细胞"
+                            + (f"，其中 {n_low} 个低置信（蓝色虚线），请在「检查细胞」里删除不像细胞的" if n_low else ""))
 
     def update_status(self):
         super().update_status()
