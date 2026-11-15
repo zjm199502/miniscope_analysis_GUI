@@ -1,4 +1,5 @@
 import json
+import pytest
 import zipfile
 
 from miniscope_gui import updater
@@ -114,3 +115,25 @@ def test_patch_install_and_activate(monkeypatch, tmp_path):
         sys.path[:] = path
     patching.mark_bad("1.0.5")
     assert not patching.usable(patching.read_current(), "1.0.2")
+
+
+def test_mac_app_check(monkeypatch, tmp_path):
+    app = tmp_path / "MiniscopeAnalysis.app"
+    calls = []
+
+    class R:
+        def __init__(self, rc): self.returncode, self.stderr = rc, "invalid signature"
+
+    rc = {"codesign": 0}
+    def fake_run(cmd, **kw):
+        calls.append(cmd[0])
+        return R(rc.get(cmd[0], 0))
+    monkeypatch.setattr(updater.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError):
+        updater._check_mac_app(app)          # missing app
+    app.mkdir()
+    updater._check_mac_app(app)
+    assert calls == ["xattr", "codesign"]    # quarantine removed, then signature verified
+    rc["codesign"] = 1
+    with pytest.raises(RuntimeError, match="签名"):
+        updater._check_mac_app(app)

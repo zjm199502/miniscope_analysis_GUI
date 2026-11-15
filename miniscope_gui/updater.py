@@ -197,6 +197,7 @@ def prepare_update(rel: Release, progress=None, should_stop=None) -> Path:
     new_dir = work / "new"
     if sys.platform == "darwin":
         subprocess.run(["ditto", "-x", "-k", str(zpath), str(new_dir)], check=True)
+        _check_mac_app(new_dir / "MiniscopeAnalysis.app")
     else:
         with zipfile.ZipFile(zpath) as z:
             z.extractall(new_dir)
@@ -204,6 +205,19 @@ def prepare_update(rel: Release, progress=None, should_stop=None) -> Path:
     if progress:
         progress(1.0)
     return new_dir
+
+
+def _check_mac_app(app: Path) -> None:
+    """Make the unpacked app open without a Gatekeeper prompt: drop any quarantine
+    flag and refuse an app whose signature is broken (macOS would block it)."""
+    if not app.is_dir():
+        raise RuntimeError("更新包内容不完整")
+    subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(app)],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    r = subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError("更新包签名校验失败，请到发布页面手动下载新版本。\n" + (r.stderr or "").strip())
 
 
 def _writable_dir(preferred: Path) -> Path:
