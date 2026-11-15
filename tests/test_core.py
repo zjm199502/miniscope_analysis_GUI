@@ -108,3 +108,19 @@ def test_preprocess_circle_fov(tmp_path, session):
     assert mask.shape == (20, 20)
     assert mask[10, 10] and not mask[0, 0]
     assert list(ws.step("preprocess")["params"]["crop"]) == [20, 12, 40, 40]
+
+
+def test_movie_reader(tmp_path):
+    from miniscope_gui.core.storage import MovieReader, MovieWriter
+    arr = np.random.default_rng(0).normal(size=(7, 5, 4)).astype(np.float16)
+    with MovieWriter(tmp_path / "m.npy", arr.shape, np.float16) as w:
+        w.write(arr[:3]); w.write(arr[3:])
+    r = MovieReader(tmp_path / "m.npy")
+    assert r.shape == arr.shape and r.dtype == np.float16
+    np.testing.assert_array_equal(r[2], arr[2])
+    np.testing.assert_array_equal(r[-1], arr[-1])
+    np.testing.assert_array_equal(r[1:5], arr[1:5])
+    np.testing.assert_array_equal(r[5:100], arr[5:])
+    np.testing.assert_array_equal(r[:, 1:3, 2], arr[:, 1:3, 2])
+    np.testing.assert_array_equal(np.asarray(r), arr)
+    np.testing.assert_array_equal(np.load(tmp_path / "m.npy"), arr)

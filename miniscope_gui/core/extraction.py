@@ -227,6 +227,8 @@ def run_extraction(session, ws: Workspace, p: ExtractionParams,
     progress = progress or (lambda f, m: None)
     should_stop = should_stop or (lambda: False)
 
+    from .cleanup import require_file
+    require_file(ws, "movie_bg.npy", "4. 去除背景")
     Y = load_bg_movie(ws)
     T, H, W = Y.shape
     npix = H * W
@@ -389,6 +391,12 @@ def _merge(A, C, seeds, patches, p, H, W):
     nrm = np.linalg.norm(Cz, axis=1)
     corr = (Cz @ Cz.T) / np.maximum(np.outer(nrm, nrm), 1e-12)
     pairs = overlap & (corr > p.merge_threshold)
+    # pieces of one object: footprints that overlap a lot, with clearly related activity
+    inter = (Ab.T @ Ab).toarray()
+    sizes = np.diag(inter).copy()
+    frac = inter / np.maximum(np.minimum.outer(sizes, sizes), 1)
+    np.fill_diagonal(frac, 0)
+    pairs |= (frac > 0.3) & (corr > 0.5)
     if not pairs.any():
         return A, C, seeds, patches
     lab_n, labels = sp.csgraph.connected_components(sp.csr_matrix(pairs), directed=False)
@@ -440,6 +448,35 @@ def _final_traces(ws, Y, A, C, b0, ybar, chunk, progress, should_stop):
     # i.e. the same units as F_local, so dF/F = dF / F0 is meaningful
     scale = (np.asarray(A.power(2).sum(0)).ravel() / np.maximum(wsum, 1e-12)).astype(np.float32)
     return C * scale[:, None], b0, raw * scale[:, None], F_local
+
+
+def suspect_cells(A, shape, diameter) -> np.ndarray:
+    """Cells worth a second look: much larger than a cell (> 3x the area of a disk of
+    the given diameter) or strongly elongated (long/short axis > 3)."""
+    H, W = shape
+    K = A.shape[1]
+    out = np.zeros(K, bool)
+    if K == 0:
+        return out
+    yy, xx = np.mgrid[:H, :W]
+    yy, xx = yy.ravel().astype(float), xx.ravel().astype(float)
+    disk_area = np.pi * (diameter / 2) ** 2
+    A = A.tocsc()
+    for k in range(K):
+        sl = slice(A.indptr[k], A.indptr[k + 1])
+        idx, w = A.indices[sl], A.data[sl].astype(float)
+        if len(idx) < 3 or w.sum() <= 0:
+            continue
+        if len(idx) > 3 * disk_area:
+            out[k] = True
+            continue
+        y, x = yy[idx], xx[idx]
+        my, mx = (w @ y) / w.sum(), (w @ x) / w.sum()
+        cov = np.cov(np.stack([y - my, x - mx]), aweights=w)
+        ev = np.sort(np.linalg.eigvalsh(cov))
+        if ev[0] > 0 and np.sqrt(ev[1] / ev[0]) > 3:
+            out[k] = True
+    return out
 
 
 def _centroids(A, H, W):

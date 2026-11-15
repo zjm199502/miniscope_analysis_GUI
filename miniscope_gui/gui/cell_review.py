@@ -6,11 +6,12 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QObject, Qt
 
-from ..core.extraction import contours, load_cells
+from ..core.extraction import contours, load_cells, suspect_cells
 
 GREEN = (60, 220, 90)
 RED = (235, 70, 70)
 SEL = (255, 230, 0)
+ORANGE = (255, 150, 30)
 
 
 class CellReview(QObject):
@@ -20,6 +21,7 @@ class CellReview(QObject):
         self.plot = trace_plot
         self.ws = None
         self.cells = None
+        self.suspect = np.zeros(0, bool)
         self.signals = None
         self.curves = []
         self.selected: list[int] = []
@@ -29,6 +31,9 @@ class CellReview(QObject):
     def open(self, ws, background: np.ndarray, title: str):
         self.ws = ws
         self.cells = load_cells(ws)
+        st = ws.step("extraction") or {}
+        diam = float(st.get("params", {}).get("cell_diameter", 10))
+        self.suspect = suspect_cells(self.cells["A"], self.cells["shape"], diam)
         from ..core.signals import load_signals
         self.signals = load_signals(ws) if ws.path("signals.npz").exists() else None
         self.view.set_image(background, title)
@@ -90,7 +95,8 @@ class CellReview(QObject):
             if k in self.selected:
                 item.setPen(pg.mkPen(SEL, width=3))
             else:
-                item.setPen(pg.mkPen(GREEN if acc[k] else RED, width=1.5))
+                col = (ORANGE if self.suspect[k] else GREEN) if acc[k] else RED
+                item.setPen(pg.mkPen(col, width=1.5))
         self._plot_traces()
 
     def _plot_traces(self):
@@ -132,4 +138,8 @@ class CellReview(QObject):
         if self.cells is None:
             return ""
         acc = self.cells["accepted"].astype(bool)
-        return f"共 {len(acc)} 个细胞，保留 {acc.sum()} 个，删除 {(~acc).sum()} 个。"
+        txt = f"共 {len(acc)} 个细胞，保留 {acc.sum()} 个，删除 {(~acc).sum()} 个。"
+        n_s = int((self.suspect & acc).sum())
+        if n_s:
+            txt += f"\n橙色 {n_s} 个形状可疑（过大或过长），建议逐个看一下。"
+        return txt

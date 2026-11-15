@@ -301,7 +301,7 @@ def behavior_on_calcium_frames(ws: Workspace, cfg) -> dict:
     valid = idx >= 0
     out = {"times": tc, "valid": valid, "behavior_frame": idx}
     j = np.clip(idx, 0, n_b - 1)
-    for key in ("x", "y", "speed", "motion"):
+    for key in ("x", "y", "x_u", "y_u", "speed", "motion"):
         if key in res:
             v = res[key][j].astype(float)
             v[~valid] = np.nan
@@ -375,6 +375,14 @@ def peri_event(dff, times, events_s, pre_s=5.0, post_s=10.0):
     return axis, np.stack(segs)
 
 
+def _cell(v):
+    if isinstance(v, (float, np.floating)):
+        return "" if not np.isfinite(v) else f"{v:.5g}"
+    if isinstance(v, (int, np.integer)) and v < 0:
+        return ""          # behaviour flag outside the behaviour video
+    return v
+
+
 def export_joint(ws: Workspace, cfg, folder=None) -> Path:
     """Per-frame table with calcium + behaviour, and per-cell modulation stats."""
     import csv
@@ -388,20 +396,24 @@ def export_joint(ws: Workspace, cfg, folder=None) -> Path:
     dff = sig["dff"][acc]
     b = behavior_on_calcium_frames(ws, cfg)
     cols = {"time_s": b["times"], "behavior_frame": b["behavior_frame"]}
-    for k in ("x", "y", "speed"):
-        if k in b:
-            cols[f"{k}_{b['unit']}" if k != "speed" else f"speed_{b['unit']}_per_s"] = b[k]
+    u = b["unit"]
+    cols[f"x_{u}"], cols[f"y_{u}"] = b["x_u"], b["y_u"]
+    cols[f"speed_{u}_per_s"] = b["speed"]
+    valid = b["valid"]
+
+    def flag(v):   # 0/1 inside the behaviour video, empty outside it
+        return np.where(valid, v.astype(int), -1)
     if "freezing" in b:
-        cols["freezing"] = b["freezing"].astype(int)
+        cols["freezing"] = flag(b["freezing"])
     for name, v in b["zones"].items():
-        cols[f"in_{name}"] = v.astype(int)
+        cols[f"in_{name}"] = flag(v)
     for i, k in enumerate(ids):
         cols[f"dff_cell_{k}"] = dff[i]
     with open(out / "aligned_frames.csv", "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(cols.keys())
         for row in zip(*cols.values()):
-            w.writerow([f"{v:.5g}" if isinstance(v, (float, np.floating)) else v for v in row])
+            w.writerow([_cell(v) for v in row])
     rows = {"cell_id": ids}
     if "freezing" in b and b["freezing"][b["valid"]].any() and not b["freezing"][b["valid"]].all():
         m = state_modulation(dff, b["freezing"], b["valid"])

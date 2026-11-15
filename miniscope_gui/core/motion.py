@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 
 from .preprocess import MOVIE_DTYPE, load_movie
-from .storage import MovieWriter
+from .storage import MovieReader, MovieWriter
 from .workspace import Workspace
 
 MC_FILE = "movie_mc.npy"
@@ -181,6 +181,8 @@ def run_motion_correction(session, ws: Workspace, p: MotionParams,
                           should_stop: Callable[[], bool] | None = None) -> dict:
     progress = progress or (lambda f, m: None)
     should_stop = should_stop or (lambda: False)
+    from .cleanup import require_file
+    require_file(ws, "movie_pre.npy", "2. 预处理")
     movie = load_movie(ws)
     T, H, W = movie.shape
     reg = _Registrar((H, W), p)
@@ -194,10 +196,14 @@ def run_motion_correction(session, ws: Workspace, p: MotionParams,
     sum_img = np.zeros((H, W), np.float64)
     max_img = np.zeros((H, W), np.float32)
     with MovieWriter(ws.path(MC_FILE), (T, H, W), MOVIE_DTYPE) as out:
+        blk, blk_start = None, -1
         for t in range(T):
             if should_stop():
                 raise InterruptedError("已取消")
-            raw = np.asarray(movie[t], dtype=np.float32)
+            if blk is None or t >= blk_start + len(blk):
+                blk_start = t
+                blk = movie[t:t + 100]
+            raw = np.asarray(blk[t - blk_start], dtype=np.float32)
             f = bandpass(raw, p.filter_sigma, p.bg_sigma)
             dx, dy, _ = reg.shift(template, f)
             if p.piecewise:
@@ -237,4 +243,4 @@ def run_motion_correction(session, ws: Workspace, p: MotionParams,
 
 
 def load_mc_movie(ws: Workspace):
-    return np.load(ws.path(MC_FILE), mmap_mode="r")
+    return MovieReader(ws.path(MC_FILE))

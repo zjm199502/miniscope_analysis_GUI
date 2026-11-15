@@ -341,7 +341,8 @@ def analyze(track: dict, cfg: BehaviorConfig) -> dict:
         unit = "cm"
     speed = step * fps
 
-    out = {"t": t, "x": xs, "y": ys, "speed": speed, "unit": unit}
+    # x/y stay in pixels (for drawing); x_u/y_u are in the reported unit
+    out = {"t": t, "x": xs, "y": ys, "x_u": xs * k, "y_u": ys * k, "speed": speed, "unit": unit}
     summary = {"duration_s": float(t[-1] - t[0]) if len(t) > 1 else 0.0,
                "distance": float(np.nansum(step)), "mean_speed": float(np.nanmean(speed)),
                "unit": unit}
@@ -381,8 +382,7 @@ def export_behavior(ws: Workspace, cfg: BehaviorConfig, folder: str | Path | Non
     out = Path(folder) if folder else ws.path("export")
     out.mkdir(parents=True, exist_ok=True)
     u = res["unit"]
-    cols = {"time_s": res["t"], f"x_{u}": res["x"] / (cfg.px_per_cm or 1) if u == "cm" and cfg.px_per_cm else res["x"],
-            f"y_{u}": res["y"] / (cfg.px_per_cm or 1) if u == "cm" and cfg.px_per_cm else res["y"],
+    cols = {"time_s": res["t"], f"x_{u}": res["x_u"], f"y_{u}": res["y_u"],
             f"speed_{u}_per_s": res["speed"]}
     if "motion" in res:
         cols["motion_index_pct"] = res["motion"]

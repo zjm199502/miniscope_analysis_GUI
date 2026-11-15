@@ -51,6 +51,8 @@ class SignalParams:
     baseline_window_s: float = 60.0
     baseline_percentile: float = 10.0
     spike_threshold: float = 3.0      # s_min in units of noise std
+    auto_tau: bool = True             # estimate each cell's decay (within 0.5-4x the indicator value)
+    refractory_s: float = 0.5         # spikes closer than this are one event
 
 
 @njit(cache=True)
@@ -87,10 +89,49 @@ def oasis_ar1(y: np.ndarray, g: float, smin: float = 0.0):
 
 
 def noise_std(x: np.ndarray) -> float:
+    """Baseline noise: the larger of the frame-to-frame estimate and the spread of
+    the trace below its median (which also captures slow baseline wobble)."""
     d = np.diff(x)
     if len(d) == 0:
         return 0.0
-    return float(1.4826 * np.median(np.abs(d - np.median(d))) / np.sqrt(2))
+    s_diff = 1.4826 * np.median(np.abs(d - np.median(d))) / np.sqrt(2)
+    med = np.median(x)
+    low = x[x < med] - med
+    s_low = float(np.sqrt(np.mean(low ** 2))) if len(low) else 0.0
+    return float(max(s_diff, s_low))
+
+
+def estimate_g(x: np.ndarray, g_lo: float, g_hi: float) -> float:
+    """AR(1) coefficient from the autocovariance (lags 1 and 2 are unaffected by white noise)."""
+    x = x - x.mean()
+    n = len(x)
+    if n < 10:
+        return float(np.clip(0.9, g_lo, g_hi))
+    a1 = float(x[1:] @ x[:-1]) / (n - 1)
+    a2 = float(x[2:] @ x[:-2]) / (n - 2)
+    g = a2 / a1 if a1 > 0 else g_lo
+    return float(np.clip(g, g_lo, g_hi))
+
+
+def group_events(s: np.ndarray, min_gap: int, min_amp: float) -> np.ndarray:
+    """Merge spikes closer than min_gap frames into one event (at the first frame,
+    amplitude = sum) and drop events smaller than min_amp."""
+    out = np.zeros_like(s)
+    idx = np.flatnonzero(s > 0)
+    if not len(idx):
+        return out
+    start, amp, last = idx[0], s[idx[0]], idx[0]
+    for i in idx[1:]:
+        if i - last < min_gap:
+            amp += s[i]
+        else:
+            if amp >= min_amp:
+                out[start] = amp
+            start, amp = i, s[i]
+        last = i
+    if amp >= min_amp:
+        out[start] = amp
+    return out
 
 
 def running_percentile(x: np.ndarray, window: int, q: float) -> np.ndarray:
@@ -106,12 +147,16 @@ def running_percentile(x: np.ndarray, window: int, q: float) -> np.ndarray:
 def compute_signals(raw, F_local, fps, p: SignalParams):
     tau = p.tau_s if p.tau_s else INDICATORS.get(p.indicator, 0.7)
     g = float(np.exp(-1.0 / (tau * fps)))
+    g_lo = float(np.exp(-1.0 / (0.5 * tau * fps)))
+    g_hi = float(np.exp(-1.0 / (4.0 * tau * fps)))
+    min_gap = max(1, int(round(p.refractory_s * fps)))
     win = int(round(p.baseline_window_s * fps))
     K, T = raw.shape
     dff = np.zeros((K, T), np.float32)
     denoised = np.zeros((K, T), np.float32)
     spikes = np.zeros((K, T), np.float32)
     noise = np.zeros(K, np.float32)
+    taus = np.zeros(K, np.float32)
     for k in range(K):
         F0 = running_percentile(F_local[k], win, p.baseline_percentile)
         F0 = np.maximum(F0, 1.0)
@@ -123,10 +168,12 @@ def compute_signals(raw, F_local, fps, p: SignalParams):
         if sn <= 0:   # degenerate (e.g. constant) trace: fall back to plain std
             sn = float(np.std(x)) or 1e-6
         noise[k] = sn
-        c, s = oasis_ar1(x, g, p.spike_threshold * sn)
+        gk = estimate_g(x, g_lo, g_hi) if p.auto_tau else g
+        taus[k] = -1.0 / (fps * np.log(gk))
+        c, s = oasis_ar1(x, gk, p.spike_threshold * sn)
         denoised[k] = c
-        spikes[k] = s
-    return dict(dff=dff, denoised=denoised, spikes=spikes, noise=noise, g=g, tau=tau)
+        spikes[k] = group_events(s, min_gap, p.spike_threshold * sn)
+    return dict(dff=dff, denoised=denoised, spikes=spikes, noise=noise, g=g, tau=tau, taus=taus)
 
 
 def event_counts(spikes: np.ndarray) -> np.ndarray:

@@ -14,7 +14,7 @@ from typing import Callable
 import numpy as np
 
 from ..io.ucla_v4 import MiniscopeSession
-from .storage import MovieWriter
+from .storage import MovieReader, MovieWriter
 from .workspace import Workspace
 
 MOVIE_FILE = "movie_pre.npy"
@@ -158,4 +158,4 @@ def run_preprocess(session: MiniscopeSession, ws: Workspace, p: PreprocessParams
 
 def load_movie(ws: Workspace) -> np.ndarray:
     """Open the preprocessed movie read-only without loading it into RAM."""
-    return np.load(ws.path(MOVIE_FILE), mmap_mode="r")
+    return MovieReader(ws.path(MOVIE_FILE))

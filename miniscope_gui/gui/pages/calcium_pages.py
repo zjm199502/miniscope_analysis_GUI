@@ -94,7 +94,7 @@ class ExtractionPage(StepPage):
         self.review_info.setWordWrap(True)
         self.lay.addWidget(self.review_info)
         self.lay.addWidget(hint("在「检查细胞」视图中：点击细胞查看它的活动曲线；"
-                                "按住 Ctrl 点击可以多选。绿色 = 保留，红色 = 删除。"))
+                                "按住 Ctrl 点击可以多选。绿色 = 保留，红色 = 删除，橙色 = 形状可疑（过大或过长，可能是血管或几个细胞连在一起）。"))
         row = QHBoxLayout()
         self.toggle_btn = QPushButton("删除 / 恢复所选")
         self.merge_btn = QPushButton("合并所选")
@@ -107,6 +107,13 @@ class ExtractionPage(StepPage):
         row2.addWidget(self.prev_btn)
         row2.addWidget(self.next_btn)
         self.lay.addLayout(row2)
+        self.lay.addWidget(heading("节省硬盘空间"))
+        self.lay.addWidget(hint("细胞提取完成后，可以删除「预处理后的视频」和「去背景后的视频」。"
+                                "运动校正后的视频、所有图片、细胞和信号都会保留。"
+                                "以后如果要重新运行第 3 或第 5 步，需要先重新运行第 2 或第 4 步。"))
+        self.clean_btn = QPushButton("清理中间文件")
+        self.clean_btn.clicked.connect(self._cleanup)
+        self.lay.addWidget(self.clean_btn)
 
     def params(self):
         return ExtractionParams(cell_diameter=self.diam.value(), min_corr=self.min_corr.value(),
@@ -122,6 +129,25 @@ class ExtractionPage(StepPage):
 
     def on_finished(self, result):
         self.status.setText(f"✓ 找到 {result['n_cells']} 个细胞")
+
+    def update_status(self):
+        super().update_status()
+        from ...core.cleanup import intermediate_size
+        ok = bool(self.ws and self.ws.step("extraction"))
+        size = intermediate_size(self.ws) if self.ws else 0
+        self.clean_btn.setEnabled(ok and size > 0)
+        self.clean_btn.setText(f"清理中间文件（{size / 1e9:.2f} GB）" if size else "清理中间文件")
+
+    def _cleanup(self):
+        from ...core.cleanup import cleanup_intermediate, intermediate_size
+        size = intermediate_size(self.ws)
+        if QMessageBox.question(self, "清理中间文件",
+                                f"将删除预处理后的视频和去背景后的视频，共 {size / 1e9:.2f} GB。"
+                                "原始数据不受影响。继续吗？") != QMessageBox.Yes:
+            return
+        freed = cleanup_intermediate(self.ws)
+        self.update_status()
+        QMessageBox.information(self, "完成", f"已释放 {freed / 1e9:.2f} GB。")
 
 
 class SignalsPage(StepPage):
@@ -140,10 +166,14 @@ class SignalsPage(StepPage):
         self.tau = self.add_param("衰减时间", self.dspin(0.05, 5.0, 0.7, 0.05, 2, " 秒"),
                                   "选「自定义」时生效。")
         self.indicator.currentTextChanged.connect(self._sync_tau)
+        self.auto_tau = self.check("按每个细胞估计衰减时间", True)
+        self.form.addRow(self.auto_tau)
+        self.form.addRow(hint("在指示剂典型值的 0.5–4 倍范围内，按每个细胞自己的曲线估计衰减时间。"
+                              "可以避免衰减较慢的细胞被拆成一串 spike。"))
         self.win = self.add_param("基线窗口", self.dspin(5, 600, 60, 5, 0, " 秒"),
                                   "在这个时间窗内取低百分位数作为基线 F0。")
         self.thr = self.add_param("spike 阈值", self.dspin(0.5, 10, 3.0, 0.5, 1, " × 噪声"),
-                                  "小于这个大小的事件不算 spike。数值越大越保守。")
+                                  "小于这个大小的事件不算 spike。数值越大越保守。0.5 秒内的连续 spike 合并为一个事件。")
         self._sync_tau(self.indicator.currentText())
 
     def build_extra(self):
@@ -163,7 +193,7 @@ class SignalsPage(StepPage):
         name = self.indicator.currentText()
         return SignalParams(indicator=name if name in INDICATORS else "custom",
                             tau_s=self.tau.value(), baseline_window_s=self.win.value(),
-                            spike_threshold=self.thr.value())
+                            spike_threshold=self.thr.value(), auto_tau=self.auto_tau.isChecked())
 
     def run_function(self):
         return run_signals

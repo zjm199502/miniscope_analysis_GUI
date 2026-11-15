@@ -234,7 +234,8 @@ class MainWindow(QMainWindow):
         return True
 
     def _movie(self, fname):
-        return np.load(self.ws.path(fname), mmap_mode="r")
+        from ..core.storage import MovieReader
+        return MovieReader(self.ws.path(fname))
 
     def _fps(self):
         st = self.ws.step("preprocess") or {}
@@ -242,6 +243,18 @@ class MainWindow(QMainWindow):
 
     def show_result(self, which: str):
         """Show a result in the centre viewer (and the trace panel when useful)."""
+        try:
+            self._show_result(which)
+        except FileNotFoundError as e:
+            from ..core.cleanup import INTERMEDIATE
+            name = getattr(e, "filename", None)
+            msg = str(e)
+            for f, label in INTERMEDIATE.items():
+                if name and str(name).endswith(f):
+                    msg = f"{label}已在「清理中间文件」时删除。需要查看时，重新运行对应的步骤即可。"
+            QMessageBox.information(self, "文件不存在", msg)
+
+    def _show_result(self, which: str):
         if which != "cells" and self.review.active:
             self.review.close()
         self._joint = None
@@ -465,8 +478,8 @@ class MainWindow(QMainWindow):
                 if "freezing" not in b:
                     raise ValueError("行为数据里没有僵直信息")
                 m = S.state_modulation(dff, b["freezing"], b["valid"])
-                up = m["p_up"] < 0.05
-                dn = m["p_down"] < 0.05
+                up = m["p_up"] < 0.025
+                dn = m["p_down"] < 0.025
                 col = [(220, 60, 60) if u else (40, 110, 220) if d else (150, 150, 150) for u, d in zip(up, dn)]
                 tr.addItem(pg.ScatterPlotItem(m["out_state"], m["in_state"], size=8,
                                               brush=[pg.mkBrush(*c) for c in col], pen=None))
@@ -474,9 +487,9 @@ class MainWindow(QMainWindow):
                 hi = float(max(m["out_state"].max(), m["in_state"].max()))
                 tr.plot([lo, hi], [lo, hi], pen=pg.mkPen((0, 0, 0), style=Qt.DashLine))
                 tr.setLabel("bottom", "运动时平均 ΔF/F"); tr.setLabel("left", "僵直时平均 ΔF/F")
-                tr.setTitle("每个点是一个细胞：红 = 僵直时更活跃，蓝 = 僵直时更安静（p < 0.05）")
+                tr.setTitle("每个点是一个细胞：红 = 僵直时更活跃，蓝 = 僵直时更安静（双侧 p < 0.05）")
                 sp.result_lbl.setText(f"{len(ids)} 个细胞中：僵直时显著升高 {up.sum()} 个，"
-                                      f"显著降低 {dn.sum()} 个（循环平移检验，p < 0.05）。\n"
+                                      f"显著降低 {dn.sum()} 个（循环平移检验，双侧 p < 0.05）。\n"
                                       f"升高：{', '.join('#' + str(i) for i in ids[up][:30])}")
             elif kind == "speed":
                 c = S.speed_correlation(dff, b["speed"], b["valid"])

@@ -503,6 +503,9 @@ class SyncPage(StepPage):
         self.event_src.addItems(["僵直开始", *names, "手动输入时间"])
         if cur:
             self.event_src.setCurrentText(cur)
+        st = self.ws.step("sync") if self.ws else None
+        if st:   # restore the method used last time
+            (self.m_manual if st["params"].get("method") == "manual" else self.m_led).setChecked(True)
 
     def draw_led(self):
         bp = self.main.beh_page

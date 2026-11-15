@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 
 from .preprocess import MOVIE_DTYPE
-from .storage import MovieWriter
+from .storage import MovieReader, MovieWriter
 from .workspace import Workspace
 
 BG_FILE = "movie_bg.npy"
@@ -48,8 +48,10 @@ def source_movie(ws: Workspace, source: str):
     from .motion import MC_FILE
     from .preprocess import MOVIE_FILE
     if source == "motion" and ws.path(MC_FILE).exists():
-        return np.load(ws.path(MC_FILE), mmap_mode="r")
-    return np.load(ws.path(MOVIE_FILE), mmap_mode="r")
+        return MovieReader(ws.path(MC_FILE))
+    from .cleanup import require_file
+    require_file(ws, MOVIE_FILE, "2. 预处理")
+    return MovieReader(ws.path(MOVIE_FILE))
 
 
 def run_background(session, ws: Workspace, p: BackgroundParams,
@@ -63,10 +65,14 @@ def run_background(session, ws: Workspace, p: BackgroundParams,
     max_img = np.zeros((H, W), np.float32)
     sum_img = np.zeros((H, W), np.float64)
     with MovieWriter(ws.path(BG_FILE), (T, H, W), MOVIE_DTYPE) as out:
+        blk, blk_start = None, -1
         for t in range(T):
             if should_stop():
                 raise InterruptedError("已取消")
-            f = remove_background(np.asarray(movie[t]), p, kernel)
+            if blk is None or t >= blk_start + len(blk):
+                blk_start = t
+                blk = movie[t:t + 100]
+            f = remove_background(blk[t - blk_start], p, kernel)
             out.write(f[None].astype(MOVIE_DTYPE))
             np.maximum(max_img, f, out=max_img)
             sum_img += f
@@ -80,4 +86,4 @@ def run_background(session, ws: Workspace, p: BackgroundParams,
 
 
 def load_bg_movie(ws: Workspace):
-    return np.load(ws.path(BG_FILE), mmap_mode="r")
+    return MovieReader(ws.path(BG_FILE))
