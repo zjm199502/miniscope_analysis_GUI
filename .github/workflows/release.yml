@@ -82,11 +82,23 @@ jobs:
           --collect-submodules pyqtgraph --collect-data pyqtgraph
           --exclude-module numba --exclude-module llvmlite --exclude-module matplotlib
           --exclude-module tkinter packaging/launcher.py
+      - name: Build and exercise Windows installer
+        shell: pwsh
+        run: |
+          ./packaging/build_setup.ps1 -Version "${{ needs.test.outputs.version }}"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./packaging/test_setup.ps1 -Version "${{ needs.test.outputs.version }}"
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path dist\MiniscopeAnalysis -DestinationPath MiniscopeAnalysis-Windows.zip
+      - run: Copy-Item dist/CalciLume-Windows-Setup.exe CalciLume-Windows-Setup.exe
       - uses: actions/upload-artifact@v4
-        with: {name: windows, path: MiniscopeAnalysis-Windows.zip, retention-days: 30}
+        with:
+          name: windows
+          retention-days: 30
+          path: |
+            MiniscopeAnalysis-Windows.zip
+            CalciLume-Windows-Setup.exe
 
   macos:
     needs: test
@@ -154,7 +166,7 @@ jobs:
             --title "自动更新通道" --notes "软件内自动更新使用的文件，请不要手动下载。新用户请从最新的正式版本安装。"
           gh release download updates -p latest.json -O old.json 2>/dev/null || echo '{}' > old.json
           upload="miniscope_gui-patch.zip"
-          if [ "$FULL" = "true" ]; then upload="$upload assets/MiniscopeAnalysis-Windows.zip assets/MiniscopeAnalysis-macOS-arm64.zip"; fi
+          if [ "$FULL" = "true" ]; then upload="$upload assets/MiniscopeAnalysis-Windows.zip assets/MiniscopeAnalysis-macOS-arm64.zip assets/CalciLume-Windows-Setup.exe"; fi
           gh release upload updates $upload --clobber
           python3 - <<'PY'
           import json, os, subprocess
@@ -167,10 +179,12 @@ jobs:
                "page": f"https://github.com/{repo}/releases/latest",
                "patch": {"url": base + "miniscope_gui-patch.zip", "size": size("miniscope_gui-patch.zip")}}
           if os.environ["FULL"] == "true":
+              m["windows_setup"] = {"url": base + "CalciLume-Windows-Setup.exe", "size": size("assets/CalciLume-Windows-Setup.exe")}
               m["full_version"] = v
               m["full"] = {n: {"url": base + n, "size": size("assets/" + n)}
                            for n in ("MiniscopeAnalysis-Windows.zip", "MiniscopeAnalysis-macOS-arm64.zip")}
           else:
+              if old.get("windows_setup"): m["windows_setup"] = old["windows_setup"]
               m["full_version"] = old.get("full_version", "0")
               m["full"] = old.get("full", {})
           json.dump(m, open("latest.json", "w", encoding="utf-8"), ensure_ascii=False, indent=1)
@@ -181,7 +195,7 @@ jobs:
         if: needs.test.outputs.major == 'true'
         run: |
           gh release view "v$VERSION" >/dev/null 2>&1 || \
-            gh release create "v$VERSION" --target "$GITHUB_SHA" --title "MiniscopeAnalysis v$VERSION" --notes-file notes.md --latest
+            gh release create "v$VERSION" --target "$GITHUB_SHA" --title "CalciLume 钙荧 v$VERSION" --notes-file notes.md --latest
           gh release upload "v$VERSION" assets/* --clobber
       - name: Also attach the full build to an existing Release
         if: needs.test.outputs.full == 'true' && inputs.attach_to_release != ''

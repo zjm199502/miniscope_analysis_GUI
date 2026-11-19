@@ -105,6 +105,14 @@ class VideoView(QWidget):
         self.timer.stop()
         self.play_btn.setText("▶ 播放")
 
+    def release_project(self):
+        self.stop()
+        self._get = None
+        self._n = 0
+        self.clear_overlays()
+        self.img.clear()
+        self._set_controls(False)
+
     def toggle_play(self):
         if self.timer.isActive():
             self.stop()

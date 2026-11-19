@@ -2,6 +2,12 @@
 
 每个版本的说明会显示在软件的「发现新版本」对话框和 GitHub Release 页面上。
 
+## v0.4.0
+
+Windows 用户请下载 [CalciLume 完整安装程序](https://github.com/zjm199502/miniscope_analysis_GUI/releases/download/v0.4.0/CalciLume-Windows-Setup.exe)。双击后按向导安装，从开始菜单启动，在 Windows 设置中卸载。
+
+关闭软件或切换项目时，停止播放和旧项目计算，释放视频句柄、图像、曲线和项目数据。便携版用户可直接安装新版，再从开始菜单打开原项目。
+
 ## v0.3.0
 
 Miniscope 分析软件现更名为 **CalciLume 钙荧**。本次为全量更新，包含新的窗口与系统图标。已有项目可继续打开。

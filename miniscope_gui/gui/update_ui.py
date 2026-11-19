@@ -29,6 +29,7 @@ class UpdateManager(QObject):
         self.bridge.checked.connect(self._on_checked)
         self.bridge.progress.connect(self._on_progress)
         self.bridge.prepared.connect(self._on_prepared)
+        self._closed = False
         self._busy = False
         self._dlg = None
         self._cancel = False
@@ -47,6 +48,10 @@ class UpdateManager(QObject):
         menu.addAction(about)
 
     # ---------------------------------------------------------------- check
+    def shutdown(self):
+        self._closed = True
+        self._cancel = True
+
     def auto_enabled(self) -> bool:
         return str(self.settings.value("update/auto", "true")).lower() in ("true", "1")
 
@@ -59,7 +64,7 @@ class UpdateManager(QObject):
         self.check(manual=False)
 
     def check(self, manual: bool):
-        if self._busy:
+        if self._closed or self._busy:
             return
         self._busy = True
 
@@ -73,6 +78,8 @@ class UpdateManager(QObject):
 
     def _on_checked(self, rel, err, manual):
         self._busy = False
+        if self._closed:
+            return
         if err is None:
             self.settings.setValue("update/last_check", time.time())
         if err is not None:
@@ -146,6 +153,8 @@ class UpdateManager(QObject):
         if self._dlg is not None:
             self._dlg.close()
             self._dlg = None
+        if self._closed:
+            return
         if err is not None:
             if not isinstance(err, InterruptedError):
                 QMessageBox.warning(self.win, "更新失败", f"{err}\n\n可以到发布页面手动下载：\n{updater.RELEASES_PAGE}")
@@ -153,7 +162,11 @@ class UpdateManager(QObject):
         small = getattr(self, "_rel", None) is not None and self._rel.kind == "patch"
         msg = ("更新已安装，重新打开软件后生效。现在重新打开吗？\n" if small else
                "新版本已下载。软件将关闭并自动重新打开，大约需要半分钟。\n现在更新吗？\n")
+        if self._rel.kind == "setup":
+            msg = "完整安装程序已下载。现在关闭软件并打开安装向导吗？\n"
         if QMessageBox.question(self.win, "更新", msg + "你的分析结果保存在输出文件夹里，不受影响。") != QMessageBox.Yes:
+            if self._rel.kind == "setup":
+                new_dir.unlink(missing_ok=True)
             return
         try:
             if small:
@@ -163,7 +176,7 @@ class UpdateManager(QObject):
         except Exception as e:
             QMessageBox.warning(self.win, "更新失败", str(e))
             return
-        QApplication.quit()
+        self.win.close()
 
     def _about(self):
         from .. import patching

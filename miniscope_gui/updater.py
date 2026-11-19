@@ -127,6 +127,10 @@ def check_latest(timeout: float = 8.0) -> Release | None:
     patch = m.get("patch") or {}
     if base and patch.get("url") and patching.parse_version(base) >= patching.parse_version(min_base):
         return Release(ver, notes, page, patch["url"], int(patch.get("size", 0)), "patch", min_base)
+    setup = m.get("windows_setup") or {}
+    if (sys.platform == "win32" and setup.get("url")
+            and is_newer(str(m.get("full_version", ver)), base or "0")):
+        return Release(ver, notes, page, setup["url"], int(setup["size"]), "setup", min_base)
     full = (m.get("full") or {}).get(asset_name() or "", {})
     if full.get("url") and is_newer(str(m.get("full_version", ver)), base or "0"):
         return Release(ver, notes, page, full["url"], int(full.get("size", 0)), "full", min_base)
@@ -186,6 +190,17 @@ def prepare_update(rel: Release, progress=None, should_stop=None) -> Path:
     """Download and unpack the update; returns the folder holding the new app."""
     if rel.kind == "patch":
         return prepare_patch(rel, progress, should_stop)
+    if rel.kind == "setup":
+        with tempfile.NamedTemporaryFile(prefix="CalciLume-Setup-", suffix=".exe", delete=False) as tmp:
+            path = Path(tmp.name)
+        try:
+            download(rel.asset_url, path, progress, should_stop)
+            if path.stat().st_size != rel.asset_size:
+                raise IOError("安装程序下载不完整")
+            return path
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
     root = install_root()
     if root is None or rel.asset_url is None:
         raise RuntimeError("当前版本不支持自动更新，请到发布页面下载新版本。")
@@ -235,6 +250,9 @@ def launch_installer(new_dir: Path) -> None:
     The caller must quit the application right after this returns."""
     root = install_root()
     pid = os.getpid()
+    if sys.platform == "win32" and new_dir.is_file() and new_dir.suffix.lower() == ".exe":
+        subprocess.Popen([str(new_dir)], close_fds=True)
+        return
     if sys.platform == "win32":
         bat = new_dir.parent / "install_update.bat"
         # paths travel as environment variables: the script itself stays ASCII

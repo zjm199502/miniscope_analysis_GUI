@@ -41,6 +41,8 @@ class MainWindow(QMainWindow):
         self.thread = None
         self.worker = None
         self.running_page = None
+        self._closing = False
+        self._pending_session = None
 
         self.steps = QListWidget()
         self.steps.setFixedWidth(150)
@@ -149,6 +151,16 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ session
     def _on_session(self, session, ws):
+        if self._closing:
+            return
+        if self.thread is not None:
+            self._pending_session = (session, ws)
+            self._stop_for_transition()
+            return
+        if self.session is not None:
+            self.steps.setCurrentRow(0)
+            self._release_project()
+        self.import_page.session = session
         self.session, self.ws = session, ws
         self.review.close()
         self.trace.hide()
@@ -210,10 +222,14 @@ class MainWindow(QMainWindow):
         self.thread.start()
 
     def _on_progress(self, frac, msg):
+        if self._closing or self._pending_session:
+            return
         self.progress.setValue(int(frac * 100))
         self.statusBar().showMessage(msg)
 
     def _on_done(self, result):
+        if self._closing or self._pending_session:
+            return
         page = self.running_page
         self._refresh_steps()
         if page is self.pre_page:
@@ -238,17 +254,27 @@ class MainWindow(QMainWindow):
             self.show_result(key)
 
     def _on_failed(self, msg):
+        if self._closing or self._pending_session:
+            return
         self.statusBar().showMessage("任务未完成")
         QMessageBox.warning(self, "出错了", msg)
 
     def _clear_thread(self):
         if self.running_page is not None:
             self.running_page.set_running(False)
+        self.thread.wait()
+        self.thread.deleteLater()
         self.thread = None
         self.worker = None
         self.running_page = None
         self.progress.setVisible(False)
         self.cancel_btn.setVisible(False)
+        if self._closing:
+            self.close()
+        elif self._pending_session:
+            pending, self._pending_session = self._pending_session, None
+            self.centralWidget().setEnabled(True)
+            self._on_session(*pending)
 
     def _cancel(self):
         if self.worker is not None:
@@ -611,8 +637,43 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "分析失败", str(e))
 
+    def _stop_for_transition(self):
+        self.view.stop()
+        self.centralWidget().setEnabled(False)
+        self.statusBar().showMessage("正在结束当前项目的任务…")
+        self._cancel()
+
+    def _release_project(self):
+        self.view.stop()
+        self._joint = None
+        self._clear_model_view()
+        self.review.release_project()
+        self.trace.clear()
+        self.trace.hide()
+        self.view.release_project()
+        self.beh_page.release_project()
+        if self.sync_page.led_roi is not None:
+            self.view.vb.removeItem(self.sync_page.led_roi)
+            self.sync_page.led_roi = None
+        self.sync_page.arduino_log = None
+        self.sync_page.log_btn.setText("Arduino 记录（可选）…")
+        self.pre_page.crop_cb.setChecked(False)
+        self.pre_page.roi = None
+        self.pre_page.session = self.import_page.session = None
+        self.reg_page.folder = None
+        self.reg_page.table.setRowCount(0)
+        self.reg_page.out_edit.clear()
+        for page in self.step_pages + self.extra_pages:
+            page.session = page.ws = None
+        self.session = self.ws = None
+
     def closeEvent(self, e):
-        if self.worker is not None:
-            self.worker.stop()
-            self.thread.wait(3000)
+        self._closing = True
+        self._pending_session = None
+        if self.thread is not None:
+            self._stop_for_transition()
+            e.ignore()
+            return
+        self.updates.shutdown()
+        self._release_project()
         super().closeEvent(e)

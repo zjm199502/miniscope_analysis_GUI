@@ -20,7 +20,9 @@ pyinstaller --noconfirm --clean --windowed --name MiniscopeAnalysis --icon packa
   --exclude-module tkinter ^
   packaging\launcher.py || goto :error
 echo.
-echo 打包完成：dist\MiniscopeAnalysis\MiniscopeAnalysis.exe
+set /p APP_VERSION=<base_version.txt
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File packaging\build_setup.ps1 -Version "%APP_VERSION%" || goto :error
+echo 打包完成：dist\CalciLume-Windows-Setup.exe
 goto :eof
 :error
 echo 打包失败，请把上面的报错信息发给维护者。

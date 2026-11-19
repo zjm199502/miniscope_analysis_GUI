@@ -76,19 +76,21 @@ class BehaviorVideo:
     def iter_gray(self, start=0, stop=None, scale=1.0):
         stop = self.n_frames if stop is None else min(stop, self.n_frames)
         cap = cv2.VideoCapture(str(self.path))
-        if start:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, start)
-        i = start
-        while i < stop:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            if scale != 1.0:
-                g = cv2.resize(g, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-            yield i, g
-            i += 1
-        cap.release()
+        try:
+            if start:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+            i = start
+            while i < stop:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                if scale != 1.0:
+                    g = cv2.resize(g, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+                yield i, g
+                i += 1
+        finally:
+            cap.release()
 
     def close(self):
         if self._cap is not None:

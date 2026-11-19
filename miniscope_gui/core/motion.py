@@ -161,17 +161,21 @@ def _ncc(a: np.ndarray, b: np.ndarray) -> float:
     return float((a * b).sum() / d) if d > 0 else 0.0
 
 
-def build_template(movie, p: MotionParams, reg: _Registrar) -> np.ndarray:
+def build_template(movie, p: MotionParams, reg: _Registrar, should_stop=None) -> np.ndarray:
     n = min(p.template_frames, movie.shape[0])
     # spread template frames over the first part of the recording
     idx = np.linspace(0, movie.shape[0] - 1, num=min(movie.shape[0], max(n, 1) * 3)).astype(int)[:n]
     frames = np.empty((len(idx), *movie.shape[1:]), np.float32)
     for j, i in enumerate(idx):
+        if should_stop and should_stop():
+            raise InterruptedError("已取消")
         frames[j] = bandpass(np.asarray(movie[i], np.float32), p.filter_sigma, p.bg_sigma)
     aligned = frames.copy()
     template = np.median(aligned, axis=0, overwrite_input=True)
     for _ in range(max(1, p.iterations)):
         for j, f in enumerate(frames):
+            if should_stop and should_stop():
+                raise InterruptedError("已取消")
             dx, dy, _ = reg.shift(template, f)
             aligned[j] = apply_shift(f, dx, dy)
         template = np.median(aligned, axis=0, overwrite_input=True)
@@ -189,7 +193,7 @@ def run_motion_correction(session, ws: Workspace, p: MotionParams,
     T, H, W = movie.shape
     reg = _Registrar((H, W), p)
     progress(0.0, "生成参考模板…")
-    template = build_template(movie, p, reg)
+    template = build_template(movie, p, reg, should_stop)
 
     shifts = np.zeros((T, 2), np.float32)
     q_before = np.zeros(T, np.float32)

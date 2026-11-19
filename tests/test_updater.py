@@ -137,3 +137,20 @@ def test_mac_app_check(monkeypatch, tmp_path):
     rc["codesign"] = 1
     with pytest.raises(RuntimeError, match="签名"):
         updater._check_mac_app(app)
+
+
+def test_full_setup_update(monkeypatch, tmp_path):
+    from miniscope_gui import patching
+    manifest = {"version": "99.0.0", "min_base": "99.0.0", "full_version": "99.0.0",
+                "windows_setup": {"url": "https://x/setup.exe", "size": 4}}
+    monkeypatch.setattr(updater, "_get_json", lambda *a: manifest)
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(patching, "base_version", lambda: "0.4.0")
+    rel = updater.check_latest()
+    assert rel.kind == "setup"
+    monkeypatch.setattr(updater, "download", lambda url, p, *a: p.write_bytes(b"test"))
+    result = updater.prepare_update(rel)
+    try:
+        assert result.suffix == ".exe" and result.read_bytes() == b"test"
+    finally:
+        result.unlink()

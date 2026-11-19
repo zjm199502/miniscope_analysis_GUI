@@ -242,3 +242,60 @@ def test_registration_page(tmp_path, app):
     w.steps.setCurrentRow(5)
     assert not w.view._overlays
     w.close()
+
+
+@pytest.mark.parametrize("close", [False, True])
+def test_release_running_project(tmp_path, app, close):
+    import threading
+    import time
+    import weakref
+    from miniscope_gui.gui.main_window import MainWindow
+    from miniscope_gui.core.workspace import Workspace
+
+    w = MainWindow()
+    w.show()
+    raw = tmp_path / "raw"
+    make_fake_v4(raw, n_frames=30, size=(64, 64))
+    w.import_page.load_source(str(raw))
+    w.import_page.set_output(str(tmp_path / "one"))
+    video = tmp_path / "behavior.avi"
+    import shutil
+    shutil.copyfile(raw / "0.avi", video)
+    w.beh_page._open_video(str(video))
+    capture = w.beh_page.video
+    assert capture._cap.isOpened()
+    active = threading.Event()
+    ended = threading.Event()
+
+    def task(session, ws, params, progress, should_stop):
+        active.set()
+        while not should_stop():
+            time.sleep(0.005)
+        ended.set()
+        return None
+
+    w._run_step(w.pre_page, task, {})
+    assert active.wait(5)
+    w.view.toggle_play()
+    w.review.signals = {"test": np.ones(10000)}
+    ref = weakref.ref(w.review.signals["test"])
+    if close:
+        w.close()
+    else:
+        other = Workspace.create_or_open(tmp_path / "two", raw)
+        w._on_session(w.session, other)
+    _wait(app, w)
+    assert ended.is_set() and w.thread is None and w.worker is None
+    assert ref() is None and capture._cap is None and not w.view.timer.isActive()
+    video.rename(tmp_path / "released.avi")
+    if close:
+        assert not w.isVisible() and w.ws is None and w.view._get is None
+    else:
+        assert w.ws is other and w.beh_page.video is None and w.isVisible()
+        w.pre_page._run()
+        _wait(app, w)
+        assert w.ws.step("preprocess")
+        for path in ("one", "two"):
+            w.import_page.set_output(str(tmp_path / path))
+        assert w.ws.root == tmp_path / "two"
+        w.close()

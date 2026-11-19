@@ -248,17 +248,19 @@ class MiniscopeSession:
         index = start
         while index < stop and fi < len(self.video_files):
             cap = cv2.VideoCapture(str(self.video_files[fi]))
-            if local:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, local)
-            while local < self.frames_per_file[fi] and index < stop:
-                ok, frame = cap.read()
-                if not ok:
-                    break
-                if (index - start) % step == 0:
-                    yield index, self._to_gray(frame)
-                index += 1
-                local += 1
-            cap.release()
+            try:
+                if local:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, local)
+                while local < self.frames_per_file[fi] and index < stop:
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    if (index - start) % step == 0:
+                        yield index, self._to_gray(frame)
+                    index += 1
+                    local += 1
+            finally:
+                cap.release()
             fi += 1
             local = 0
 

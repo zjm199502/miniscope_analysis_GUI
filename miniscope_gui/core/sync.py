@@ -35,19 +35,21 @@ def led_trace(video_path, roi, progress=None, should_stop=None):
     should_stop = should_stop or (lambda: False)
     x, y, w, h = (int(round(v)) for v in roi)
     cap = cv2.VideoCapture(str(video_path))
-    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
-    vals = []
-    while True:
-        if should_stop():
-            raise InterruptedError("已取消")
-        ok = cap.grab()
-        if not ok:
-            break
-        ok, frame = cap.retrieve()
-        vals.append(float(frame[y:y + h, x:x + w].mean()))
-        if len(vals) % 500 == 0:
-            progress(min(0.99, len(vals) / n), f"读取 LED 亮度 {len(vals)}/{n}")
-    cap.release()
+    try:
+        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+        vals = []
+        while True:
+            if should_stop():
+                raise InterruptedError("已取消")
+            ok = cap.grab()
+            if not ok:
+                break
+            ok, frame = cap.retrieve()
+            vals.append(float(frame[y:y + h, x:x + w].mean()))
+            if len(vals) % 500 == 0:
+                progress(min(0.99, len(vals) / n), f"读取 LED 亮度 {len(vals)}/{n}")
+    finally:
+        cap.release()
     return np.asarray(vals)
 
 

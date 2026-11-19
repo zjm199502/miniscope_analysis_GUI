@@ -171,6 +171,14 @@ class BehaviorPage(StepPage):
         if hasattr(self, "export_btn"):
             self.export_btn.setEnabled(ok)
 
+    def release_project(self):
+        self.cancel_edit()
+        if self.video is not None:
+            self.video.close()
+            self.video = None
+        self.cfg = BehaviorConfig()
+        self.video_lbl.setText("未导入")
+
     def pick_video(self):
         f, _ = QFileDialog.getOpenFileName(self, "选择行为视频", "",
                                            "视频 (*.avi *.mp4 *.mov *.mkv *.wmv *.mpg *.mpeg);;所有文件 (*)")
@@ -179,10 +187,13 @@ class BehaviorPage(StepPage):
 
     def _open_video(self, path, fps=None, keep_cfg=False):
         try:
-            self.video = BehaviorVideo(path, fps)
+            video = BehaviorVideo(path, fps)
         except Exception as e:
             QMessageBox.warning(self, "无法打开视频", str(e))
             return
+        if self.video is not None:
+            self.video.close()
+        self.video = video
         if not keep_cfg:
             self.cfg.video = str(path)
         self.fps.setValue(self.video.fps)

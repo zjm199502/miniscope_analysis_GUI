@@ -24,6 +24,10 @@
 
 ## 安装
 
+Windows 用户请[下载安装程序](https://github.com/zjm199502/miniscope_analysis_GUI/releases/latest/download/CalciLume-Windows-Setup.exe)，双击后按向导安装，然后从开始菜单打开 CalciLume。卸载入口位于 Windows「已安装的应用」。实验数据和分析项目请保存在单独的项目目录。
+
+### 从源码运行
+
 需要 Python 3.10 或更新版本。
 
 ```bash

@@ -61,6 +61,13 @@ class CellReview(QObject):
         self.view.clear_overlays()
         self.curves = []
 
+    def release_project(self):
+        self.close()
+        self.ws = self.cells = self.signals = None
+        self.selected.clear()
+        self.quality = np.empty(0)
+        self.suspect = np.empty(0, bool)
+
     def reload(self):
         if self.active and self.ws is not None:
             img = self.view.img.image
