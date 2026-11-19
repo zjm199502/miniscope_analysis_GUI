@@ -8,18 +8,20 @@ from miniscope_gui.core.workspace import Workspace
 
 
 def make_movie(T=600, H=96, W=96, n_cells=12, fps=10.0, shifts=None, seed=1,
-               cell_radius=3.0, noise=2.0, tau_s=0.8):
+               cell_radius=3.0, noise=2.0, tau_s=0.8, fixed_centres=None, amplitude=40.0):
     rng = np.random.default_rng(seed)
     yy, xx = np.mgrid[:H, :W]
     # cells away from the border
-    centres = []
+    centres = [] if fixed_centres is None else list(np.asarray(fixed_centres, float))
+    if fixed_centres is not None and len(centres) != n_cells:
+        raise ValueError("fixed_centres must contain n_cells positions")
     while len(centres) < n_cells:
         c = rng.uniform(12, [H - 12, W - 12])
         if all(np.hypot(*(c - d)) > 4 * cell_radius for d in centres):
             centres.append(c)
-    centres = np.array(centres)
+    centres = np.asarray(centres).reshape(-1, 2)
     A = np.stack([np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * cell_radius ** 2))
-                  for cy, cx in centres])
+                  for cy, cx in centres]) if n_cells else np.empty((0, H, W))
     # spikes -> AR(1) calcium
     g = np.exp(-1 / (tau_s * fps))
     S = (rng.random((n_cells, T)) < 0.02) * rng.uniform(0.5, 1.5, (n_cells, T))
@@ -34,7 +36,7 @@ def make_movie(T=600, H=96, W=96, n_cells=12, fps=10.0, shifts=None, seed=1,
     drift = 1 + 0.05 * np.sin(np.linspace(0, 6, T))
     movie = np.empty((T, H, W), np.float32)
     for t in range(T):
-        f = bg * drift[t] + 40 * np.tensordot(C[:, t], A, axes=1)
+        f = bg * drift[t] + amplitude * np.tensordot(C[:, t], A, axes=1)
         if shifts is not None:
             M = np.float32([[1, 0, shifts[t, 0]], [0, 1, shifts[t, 1]]])
             f = cv2.warpAffine(f.astype(np.float32), M, (W, H), borderMode=cv2.BORDER_REFLECT)

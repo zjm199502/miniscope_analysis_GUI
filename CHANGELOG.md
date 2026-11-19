@@ -2,6 +2,10 @@
 
 每个版本的说明会显示在软件的「发现新版本」对话框和 GitHub Release 页面上。
 
+## v0.4.1
+
+「帮助 → 细胞提取基准（在线）」可查看 24 组合成实验和一个人工标注真实视野的结果，包含误差定位图、候选坐标和复跑脚本。本次更新提供评估资料，沿用 0.4.0 的提取算法和默认参数。
+
 ## v0.4.0
 
 Windows 用户请下载 [CalciLume 完整安装程序](https://github.com/zjm199502/miniscope_analysis_GUI/releases/download/v0.4.0/CalciLume-Windows-Setup.exe)。双击后按向导安装，从开始菜单启动，在 Windows 设置中卸载。

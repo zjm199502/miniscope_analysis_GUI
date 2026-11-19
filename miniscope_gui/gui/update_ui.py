@@ -43,6 +43,10 @@ class UpdateManager(QObject):
         self.auto_act.setChecked(self.auto_enabled())
         self.auto_act.toggled.connect(lambda v: self.settings.setValue("update/auto", bool(v)))
         menu.addAction(self.auto_act)
+        benchmark = QAction("细胞提取基准（在线）", window)
+        benchmark.triggered.connect(lambda: QDesktopServices.openUrl(
+            QUrl(f"https://github.com/{updater.REPO}/tree/main/benchmarks")))
+        menu.addAction(benchmark)
         about = QAction("关于", window)
         about.triggered.connect(self._about)
         menu.addAction(about)
