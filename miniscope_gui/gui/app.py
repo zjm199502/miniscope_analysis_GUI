@@ -3,7 +3,7 @@ import sys
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
-from .. import APP_NAME
+from .. import APP_NAME, __version__
 from .main_window import MainWindow
 
 
@@ -11,7 +11,7 @@ def main():
     app = QApplication(sys.argv)
     # Fusion + explicit light palette: looks the same on every PC and avoids
     # unreadable text when Windows is in dark mode.
-    app.setApplicationDisplayName(APP_NAME)
+    app.setApplicationDisplayName(f"{APP_NAME} v{__version__}")
     app.setStyle("Fusion")
     app.setPalette(app.style().standardPalette())
     try:

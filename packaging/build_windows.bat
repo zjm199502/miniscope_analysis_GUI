@@ -1,4 +1,5 @@
 @echo off
+setlocal
 chcp 65001 >nul
 REM 打包成 Windows 程序（在 Windows 上、本仓库根目录运行）
 REM 结果在 dist\MiniscopeAnalysis\MiniscopeAnalysis.exe ，整个文件夹可以拷给同学直接用
@@ -9,6 +10,9 @@ call .build-venv\Scripts\activate.bat
 python -m pip install --upgrade pip
 python -m pip install . pyinstaller || goto :error
 python -c "import miniscope_gui; open('base_version.txt','w').write(miniscope_gui.__version__)" || goto :error
+REM Keep unrelated DLLs on the workstation PATH out of the portable build.
+for /f "delims=" %%B in ('python -c "import sys; print(sys.base_prefix)"') do set "BUILD_PYTHON=%%B"
+set "PATH=%CD%\.build-venv\Scripts;%SystemRoot%\System32;%SystemRoot%;%BUILD_PYTHON%;%BUILD_PYTHON%\DLLs"
 pyinstaller --noconfirm --clean --windowed --name MiniscopeAnalysis --icon packaging/calcilume.ico ^
   --add-data "base_version.txt:." --collect-submodules miniscope_gui --collect-data miniscope_gui ^
   --collect-submodules pyqtgraph --collect-data pyqtgraph ^
