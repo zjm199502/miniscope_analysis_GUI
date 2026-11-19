@@ -64,23 +64,24 @@ def run_background(session, ws: Workspace, p: BackgroundParams,
     kernel = disk(max(1, int(p.cell_diameter)))
     max_img = np.zeros((H, W), np.float32)
     sum_img = np.zeros((H, W), np.float64)
-    with MovieWriter(ws.path(BG_FILE), (T, H, W), MOVIE_DTYPE) as out:
-        blk, blk_start = None, -1
-        for t in range(T):
-            if should_stop():
-                raise InterruptedError("已取消")
-            if blk is None or t >= blk_start + len(blk):
-                blk_start = t
-                blk = movie[t:t + 100]
-            f = remove_background(blk[t - blk_start], p, kernel)
-            out.write(f[None].astype(MOVIE_DTYPE))
-            np.maximum(max_img, f, out=max_img)
-            sum_img += f
-            if t % 200 == 0 or t == T - 1:
-                progress((t + 1) / T, f"去除背景 {t + 1}/{T} 帧")
-    np.save(ws.path("bg_max.npy"), max_img)
-    np.save(ws.path("bg_mean.npy"), (sum_img / T).astype(np.float32))
-    ws.record_step("background", asdict(p), {"movie": BG_FILE})
+    with ws.stage_outputs() as staged:
+        with MovieWriter(staged.path(BG_FILE), (T, H, W), MOVIE_DTYPE) as out:
+            blk, blk_start = None, -1
+            for t in range(T):
+                if should_stop():
+                    raise InterruptedError("已取消")
+                if blk is None or t >= blk_start + len(blk):
+                    blk_start = t
+                    blk = movie[t:t + 100]
+                f = remove_background(blk[t - blk_start], p, kernel)
+                out.write(f[None].astype(MOVIE_DTYPE))
+                np.maximum(max_img, f, out=max_img)
+                sum_img += f
+                if t % 200 == 0 or t == T - 1:
+                    progress((t + 1) / T, f"去除背景 {t + 1}/{T} 帧")
+        np.save(staged.path("bg_max.npy"), max_img)
+        np.save(staged.path("bg_mean.npy"), (sum_img / T).astype(np.float32))
+        staged.record_step("background", asdict(p), {"movie": BG_FILE})
     progress(1.0, "去除背景完成")
     return {"movie": BG_FILE}
 

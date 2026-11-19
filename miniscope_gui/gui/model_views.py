@@ -192,9 +192,18 @@ class Painter:
         self.hist(r["null"], f"蓝 = 打乱时间后的结果，红线 = 真实结果（p = {s['p']:.3f}）",
                   "平衡准确率" if s["binary"] else "相关系数 r", mark=s["metric"])
 
-    def dec_weights(self, r, plot=True):
+    def dec_weights_y(self, r):
+        self.dec_weights(r, axis=1)
+
+    def dec_weights(self, r, plot=True, axis=0):
         w = r["weights"]
-        self.cell_map(r, _diverging(w), "解码权重：红 = 活动升高时倾向判为该行为，蓝 = 相反",
+        title = "解码权重"
+        if w.ndim == 2:
+            w = w[:, axis]
+            title += " · 位置 " + "XY"[axis]
+        elif r["summary"]["target"] == "位置":
+            title += " · 位置 X（旧结果）"
+        self.cell_map(r, _diverging(w), title,
                       sizes=6 + 8 * np.abs(w) / (np.abs(w).max() or 1))
         if plot:
             self.hist(w, "各细胞的解码权重", "权重", mark=0)

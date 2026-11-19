@@ -89,8 +89,9 @@ def frame_range(session: MiniscopeSession, p: PreprocessParams) -> tuple[int, in
     t = session.frame_times_s()
     start = int(np.searchsorted(t, p.start_s, side="left"))
     stop = session.n_frames if p.end_s is None else int(np.searchsorted(t, p.end_s, side="right"))
-    start = max(0, min(start, session.n_frames - 1))
-    stop = max(start + 1, min(stop, session.n_frames))
+    stop = min(stop, session.n_frames)
+    if start >= stop:
+        raise ValueError("所选时间段没有录制帧")
     return start, stop
 
 
@@ -123,35 +124,36 @@ def run_preprocess(session: MiniscopeSession, ws: Workspace, p: PreprocessParams
     buf = np.empty((chunk, H, W), np.float32)
     nbuf = 0
     out_i = 0
-    with MovieWriter(ws.path(MOVIE_FILE), (n_out, H, W), MOVIE_DTYPE) as writer:
-        for idx, frame in session.iter_frames(start, stop):
-            if should_stop():
-                raise InterruptedError("已取消")
-            buf[nbuf] = bin_spatial(frame[None, y:y + h, x:x + w], p.spatial_bin)[0][:H, :W]
-            nbuf += 1
-            if nbuf == chunk or idx == stop - 1:
-                if idx == stop - 1 and out_i + nbuf // tb != n_out:
-                    raise IOError(f"只读到 {out_i + nbuf // tb}/{n_out} 帧，视频文件可能损坏")
-                nb = nbuf // tb
-                block = buf[:nb * tb].reshape(nb, tb, H, W).mean(axis=1)
-                sum_img += block.sum(axis=0)
-                np.maximum(max_img, block.max(axis=0), out=max_img)
-                writer.write(block.astype(MOVIE_DTYPE))
-                out_i += nb
-                nbuf = 0
-                progress(out_i / n_out, f"预处理 {out_i}/{n_out} 帧")
+    with ws.stage_outputs() as staged:
+        with MovieWriter(staged.path(MOVIE_FILE), (n_out, H, W), MOVIE_DTYPE) as writer:
+            for idx, frame in session.iter_frames(start, stop):
+                if should_stop():
+                    raise InterruptedError("已取消")
+                buf[nbuf] = bin_spatial(frame[None, y:y + h, x:x + w], p.spatial_bin)[0][:H, :W]
+                nbuf += 1
+                if nbuf == chunk or idx == stop - 1:
+                    if idx == stop - 1 and out_i + nbuf // tb != n_out:
+                        raise IOError(f"只读到 {out_i + nbuf // tb}/{n_out} 帧，视频文件可能损坏")
+                    nb = nbuf // tb
+                    block = buf[:nb * tb].reshape(nb, tb, H, W).mean(axis=1)
+                    sum_img += block.sum(axis=0)
+                    np.maximum(max_img, block.max(axis=0), out=max_img)
+                    writer.write(block.astype(MOVIE_DTYPE))
+                    out_i += nb
+                    nbuf = 0
+                    progress(out_i / n_out, f"预处理 {out_i}/{n_out} 帧")
 
-    np.save(ws.path(TIMES_FILE), times)
-    np.save(ws.path(MEAN_FILE), (sum_img / max(out_i, 1)).astype(np.float32))
-    np.save(ws.path(MAX_FILE), max_img)
-    np.save(ws.path(MASK_FILE), fov_mask(p, H, W))
+        np.save(staged.path(TIMES_FILE), times)
+        np.save(staged.path(MEAN_FILE), (sum_img / max(out_i, 1)).astype(np.float32))
+        np.save(staged.path(MAX_FILE), max_img)
+        np.save(staged.path(MASK_FILE), fov_mask(p, H, W))
 
-    params = asdict(p)
-    params["frame_range"] = [start, stop]
-    params["fps_out"] = session.fps / tb
-    outputs = {"movie": MOVIE_FILE, "times": TIMES_FILE, "mean": MEAN_FILE,
-               "max": MAX_FILE, "mask": MASK_FILE, "shape": [out_i, H, W]}
-    ws.record_step("preprocess", params, outputs)
+        params = asdict(p)
+        params["frame_range"] = [start, stop]
+        params["fps_out"] = session.fps / tb
+        outputs = {"movie": MOVIE_FILE, "times": TIMES_FILE, "mean": MEAN_FILE,
+                   "max": MAX_FILE, "mask": MASK_FILE, "shape": [out_i, H, W]}
+        staged.record_step("preprocess", params, outputs)
     progress(1.0, "预处理完成")
     return outputs
 

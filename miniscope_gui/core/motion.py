@@ -60,7 +60,7 @@ class _Registrar:
         self.p = p
         h, w = shape
         self.window = cv2.createHanningWindow((w, h), cv2.CV_32F)
-        self._tpl_id = None
+        self._template = None
         self._tpl_fft = None
 
     def _fft(self, img, win):
@@ -69,8 +69,8 @@ class _Registrar:
     def shift(self, template: np.ndarray, img: np.ndarray, window=None) -> tuple[float, float, float]:
         """Return (dx, dy, response): the shift that moves img onto template."""
         win = self.window if window is None else window
-        if window is None and self._tpl_id is not id(template):
-            self._tpl_id, self._tpl_fft = id(template), self._fft(template, win)
+        if window is None and self._template is not template:
+            self._template, self._tpl_fft = template, self._fft(template, win)
         F1 = self._tpl_fft if window is None else self._fft(template, win)
         F2 = self._fft(img, win)
         R = F1 * np.conj(F2)
@@ -165,14 +165,16 @@ def build_template(movie, p: MotionParams, reg: _Registrar) -> np.ndarray:
     n = min(p.template_frames, movie.shape[0])
     # spread template frames over the first part of the recording
     idx = np.linspace(0, movie.shape[0] - 1, num=min(movie.shape[0], max(n, 1) * 3)).astype(int)[:n]
-    frames = [bandpass(np.asarray(movie[i], np.float32), p.filter_sigma, p.bg_sigma) for i in idx]
-    template = np.median(np.stack(frames), axis=0).astype(np.float32)
+    frames = np.empty((len(idx), *movie.shape[1:]), np.float32)
+    for j, i in enumerate(idx):
+        frames[j] = bandpass(np.asarray(movie[i], np.float32), p.filter_sigma, p.bg_sigma)
+    aligned = frames.copy()
+    template = np.median(aligned, axis=0, overwrite_input=True)
     for _ in range(max(1, p.iterations)):
-        aligned = []
-        for f in frames:
+        for j, f in enumerate(frames):
             dx, dy, _ = reg.shift(template, f)
-            aligned.append(apply_shift(f, dx, dy))
-        template = np.median(np.stack(aligned), axis=0).astype(np.float32)
+            aligned[j] = apply_shift(f, dx, dy)
+        template = np.median(aligned, axis=0, overwrite_input=True)
     return template
 
 
@@ -195,49 +197,50 @@ def run_motion_correction(session, ws: Workspace, p: MotionParams,
     windows: dict = {}
     sum_img = np.zeros((H, W), np.float64)
     max_img = np.zeros((H, W), np.float32)
-    with MovieWriter(ws.path(MC_FILE), (T, H, W), MOVIE_DTYPE) as out:
-        blk, blk_start = None, -1
-        for t in range(T):
-            if should_stop():
-                raise InterruptedError("已取消")
-            if blk is None or t >= blk_start + len(blk):
-                blk_start = t
-                blk = movie[t:t + 100]
-            raw = np.asarray(blk[t - blk_start], dtype=np.float32)
-            f = bandpass(raw, p.filter_sigma, p.bg_sigma)
-            dx, dy, _ = reg.shift(template, f)
-            if p.piecewise:
-                fx, fy = _piecewise_field(reg, template, f, dx, dy, p, windows)
-                corrected = apply_field(raw.astype(np.float32), fx, fy)
-                fc = apply_field(f, fx, fy)
-                shifts[t] = (float(fx.mean()), float(fy.mean()))
-            else:
-                corrected = apply_shift(raw.astype(np.float32), dx, dy)
-                fc = apply_shift(f, dx, dy)
-                shifts[t] = (dx, dy)
-            if t % 10 == 0:  # quality on a subsample: cheap and enough for a plot
-                q_before[t] = _ncc(template, f)
-                q_after[t] = _ncc(template, fc)
-            out.write(corrected[None].astype(MOVIE_DTYPE))
-            sum_img += corrected
-            np.maximum(max_img, corrected, out=max_img)
-            if t % 100 == 0 or t == T - 1:
-                progress((t + 1) / T, f"运动校正 {t + 1}/{T} 帧")
+    with ws.stage_outputs() as staged:
+        with MovieWriter(staged.path(MC_FILE), (T, H, W), MOVIE_DTYPE) as out:
+            blk, blk_start = None, -1
+            for t in range(T):
+                if should_stop():
+                    raise InterruptedError("已取消")
+                if blk is None or t >= blk_start + len(blk):
+                    blk_start = t
+                    blk = movie[t:t + 100]
+                raw = np.asarray(blk[t - blk_start], dtype=np.float32)
+                f = bandpass(raw, p.filter_sigma, p.bg_sigma)
+                dx, dy, _ = reg.shift(template, f)
+                if p.piecewise:
+                    fx, fy = _piecewise_field(reg, template, f, dx, dy, p, windows)
+                    corrected = apply_field(raw.astype(np.float32), fx, fy)
+                    fc = apply_field(f, fx, fy)
+                    shifts[t] = (float(fx.mean()), float(fy.mean()))
+                else:
+                    corrected = apply_shift(raw.astype(np.float32), dx, dy)
+                    fc = apply_shift(f, dx, dy)
+                    shifts[t] = (dx, dy)
+                if t % 10 == 0:  # quality on a subsample: cheap and enough for a plot
+                    q_before[t] = _ncc(template, f)
+                    q_after[t] = _ncc(template, fc)
+                out.write(corrected[None].astype(MOVIE_DTYPE))
+                sum_img += corrected
+                np.maximum(max_img, corrected, out=max_img)
+                if t % 100 == 0 or t == T - 1:
+                    progress((t + 1) / T, f"运动校正 {t + 1}/{T} 帧")
 
-    sub = np.arange(0, T, 10)
-    np.save(ws.path(SHIFTS_FILE), shifts)
-    np.save(ws.path(TEMPLATE_FILE), template)
-    np.save(ws.path(MC_QUALITY_FILE), np.stack([sub, q_before[sub], q_after[sub]], axis=1))
-    np.save(ws.path("mc_mean.npy"), (sum_img / T).astype(np.float32))
-    np.save(ws.path("mc_max.npy"), max_img)
-    summary = {
-        "max_abs_shift": float(np.abs(shifts).max()),
-        "mean_abs_shift": float(np.abs(shifts).mean()),
-        "corr_before": float(q_before[sub].mean()),
-        "corr_after": float(q_after[sub].mean()),
-    }
-    ws.record_step("motion", asdict(p), {"movie": MC_FILE, "shifts": SHIFTS_FILE,
-                                         "template": TEMPLATE_FILE, **summary})
+        sub = np.arange(0, T, 10)
+        np.save(staged.path(SHIFTS_FILE), shifts)
+        np.save(staged.path(TEMPLATE_FILE), template)
+        np.save(staged.path(MC_QUALITY_FILE), np.stack([sub, q_before[sub], q_after[sub]], axis=1))
+        np.save(staged.path("mc_mean.npy"), (sum_img / T).astype(np.float32))
+        np.save(staged.path("mc_max.npy"), max_img)
+        summary = {
+            "max_abs_shift": float(np.abs(shifts).max()),
+            "mean_abs_shift": float(np.abs(shifts).mean()),
+            "corr_before": float(q_before[sub].mean()),
+            "corr_after": float(q_after[sub].mean()),
+        }
+        staged.record_step("motion", asdict(p), {"movie": MC_FILE, "shifts": SHIFTS_FILE,
+                                             "template": TEMPLATE_FILE, **summary})
     progress(1.0, "运动校正完成")
     return summary
 

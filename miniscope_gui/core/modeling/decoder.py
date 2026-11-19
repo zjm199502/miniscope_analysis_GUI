@@ -85,12 +85,15 @@ class _Folds:
         self.items = []
         for f in np.unique(fold[fold >= 0]):
             tr, te = np.where((fold >= 0) & (fold != f))[0], np.where(fold == f)[0]
-            mu = X[tr].mean(0)
-            U, s, Vt = np.linalg.svd(X[tr] - mu, full_matrices=False)
+            train = X[tr]
+            mu = train.mean(0)
+            std = train.std(0)
+            std[std <= 1e-12] = 1.0
+            U, s, Vt = np.linalg.svd((train - mu) / std, full_matrices=False)
             k = int(min(n_pc, (s > 1e-9 * s[0]).sum()))
             scale = s[:k] / np.sqrt(len(tr))
             Ptr = U[:, :k] * np.sqrt(len(tr))                  # unit-variance scores
-            Pte = (X[te] - mu) @ Vt[:k].T / scale
+            Pte = ((X[te] - mu) / std) @ Vt[:k].T / scale
             self.items.append((tr, te, Ptr, Pte, Vt[:k], scale))
 
 
@@ -129,6 +132,8 @@ def decode(X, y, fold, binary: bool, n_pc=30, l2=1.0, n_shuffle=200, seed=0,
     progress = progress or (lambda f, m: None)
     rng = np.random.default_rng(seed)
     use = fold >= 0
+    if np.unique(fold[use]).size < 2:
+        raise ValueError("有效数据至少需要覆盖两个交叉验证分组")
     folds = _Folds(X, fold, n_pc)
     T = int(use.sum())
     idx = np.where(use)[0]
@@ -156,8 +161,7 @@ def decode(X, y, fold, binary: bool, n_pc=30, l2=1.0, n_shuffle=200, seed=0,
             progress(0.2 + 0.7 * (i + 1) / n_shuffle, f"打乱检验 {i + 1}/{n_shuffle}")
     pval = float((1 + (null >= metric).sum()) / (n_shuffle + 1))
     # weights of every cell from a fit on all usable data
-    mu = X[use].mean(0)
-    U, s, Vt = np.linalg.svd(X[use] - mu, full_matrices=False)
+    U, s, Vt = np.linalg.svd(zscore(X[use], axis=0), full_matrices=False)
     k = int(min(n_pc, (s > 1e-9 * s[0]).sum()))
     P = U[:, :k] * np.sqrt(T)
     scale = s[:k] / np.sqrt(T)
@@ -169,7 +173,9 @@ def decode(X, y, fold, binary: bool, n_pc=30, l2=1.0, n_shuffle=200, seed=0,
     else:
         Yc = Y[use] - Y[use].mean(0)
         C = np.linalg.solve(P.T @ P + l2 * np.eye(k), P.T @ Yc)
-        weights = (Vt[:k].T @ (C / scale[:, None]))[:, 0]
+        weights = Vt[:k].T @ (C / scale[:, None])
+        if weights.shape[1] == 1:
+            weights = weights[:, 0]
     return dict(metric=metric, auc=a, pred=pred, null=null, p=pval, weights=weights)
 
 
@@ -213,7 +219,7 @@ def run_decoder(session, ws: Workspace, args: dict, progress=None, should_stop=N
         if not 0.02 <= frac <= 0.98:
             raise ValueError(f"「{p.target}」在记录中占 {100 * frac:.1f}%，两种状态都需要有足够的时间才能解码")
     src = ds.dff if p.signal == "dff" else ds.events
-    X = zscore(src, axis=1).T
+    X = src.T
     fold = block_folds(ds.n_bins, p.n_folds, 20.0, ds.fps, valid)
     progress(0.1, "训练解码器…")
     res = decode(X, y, fold, binary, p.n_pc, p.l2, p.n_shuffle, p.seed, progress, should_stop)
@@ -233,7 +239,15 @@ def run_decoder(session, ws: Workspace, args: dict, progress=None, should_stop=N
 
 
 def export_decoder(ws: Workspace, res: dict, folder):
-    write_csv(folder / "decoder_cell_weights.csv", {"cell_id": res["ids"], "weight": res["weights"]})
+    weights = res["weights"]
+    columns = {"cell_id": res["ids"]}
+    if weights.ndim == 2:
+        columns.update(weight_x=weights[:, 0], weight_y=weights[:, 1])
+    elif res["summary"]["target"] == "位置":
+        columns["weight_x"] = weights
+    else:
+        columns["weight"] = weights
+    write_csv(folder / "decoder_cell_weights.csv", columns)
     cols = {"time_s": res["times"], "used": res["valid"].astype(int)}
     truth, pred = res["truth"], res["pred"]
     if truth.ndim == 1:

@@ -124,3 +124,83 @@ def test_movie_reader(tmp_path):
     np.testing.assert_array_equal(r[:, 1:3, 2], arr[:, 1:3, 2])
     np.testing.assert_array_equal(np.asarray(r), arr)
     np.testing.assert_array_equal(np.load(tmp_path / "m.npy"), arr)
+
+@pytest.mark.parametrize("cancel_after", [0, 20])
+def test_cancelled_rerun_keeps_project(session, tmp_path, cancel_after):
+    s, _ = session
+    ws = Workspace.create_or_open(tmp_path / "out", s.folder)
+    run_preprocess(s, ws, PreprocessParams())
+    before = {p.name: p.read_bytes() for p in ws.root.iterdir()}
+    calls = iter(range(s.n_frames))
+    with pytest.raises(InterruptedError):
+        run_preprocess(s, ws, PreprocessParams(chunk_frames=10, spatial_bin=1),
+                       should_stop=lambda: next(calls) == cancel_after)
+    reopened = Workspace.create_or_open(ws.root)
+    assert reopened.step("preprocess") == ws.step("preprocess")
+    assert {p.name: p.read_bytes() for p in reopened.root.iterdir()} == before
+
+
+def test_preprocess_time_intersection(session, tmp_path):
+    s, _ = session
+    ws = Workspace.create_or_open(tmp_path / "out")
+    for start, end in [(100, None), (2, 1), (0, -1)]:
+        with pytest.raises(ValueError):
+            run_preprocess(s, ws, PreprocessParams(start_s=start, end_s=end))
+    output = run_preprocess(s, ws, PreprocessParams(start_s=0, end_s=0))
+    assert output["shape"][0] == 1
+
+
+def test_truncated_movie_rejected(tmp_path):
+    from miniscope_gui.core.storage import MovieReader
+    path = tmp_path / "movie.npy"
+    np.save(path, np.zeros((5, 8, 8), np.uint8))
+    opened = MovieReader(path)
+    with path.open("r+b") as fh:
+        fh.truncate(path.stat().st_size - 10)
+    with pytest.raises(IOError, match="movie.npy.*10"):
+        MovieReader(path)
+    with pytest.raises(IOError, match="movie.npy.*10"):
+        opened[-1]
+
+def test_interrupted_publication_recovers_on_reopen(tmp_path):
+    from miniscope_gui.core.workspace import PROJECT_FILE, PUBLISH_DIR
+    ws = Workspace.create_or_open(tmp_path / "out")
+    ws.record_step("preprocess", {}, {})
+    pending = ws.root / PUBLISH_DIR
+    previous = pending / "previous"
+    previous.mkdir(parents=True)
+    created = pending / "created"
+    created.mkdir()
+    (previous / "movie_pre.npy").write_bytes(b"original")
+    ws.path("movie_pre.npy").write_bytes(b"partial replacement")
+    (created / "new.npy").touch()
+    ws.path("new.npy").touch()
+    ws.path(PROJECT_FILE).rename(previous / PROJECT_FILE)
+    reopened = Workspace.create_or_open(ws.root)
+    assert reopened.step("preprocess") == ws.step("preprocess")
+    assert reopened.path("movie_pre.npy").read_bytes() == b"original"
+    assert not reopened.path("new.npy").exists()
+    assert not pending.exists()
+
+def test_failed_metadata_replace_restores_all_files(tmp_path, monkeypatch):
+    from pathlib import Path
+    from miniscope_gui.core.workspace import PROJECT_FILE, PUBLISH_DIR
+    ws = Workspace.create_or_open(tmp_path / "out")
+    ws.path("movie.npy").write_bytes(b"original")
+    replace = Path.replace
+
+    def fail_metadata(path, dest):
+        if path == ws.root / PUBLISH_DIR / PROJECT_FILE:
+            raise PermissionError("simulated locked file")
+        return replace(path, dest)
+
+    monkeypatch.setattr(Path, "replace", fail_metadata)
+    with pytest.raises(PermissionError):
+        with ws.stage_outputs() as staged:
+            staged.path("movie.npy").write_bytes(b"new")
+            staged.path("summary.npy").write_bytes(b"new")
+            staged.record_step("preprocess", {}, {})
+    reopened = Workspace.create_or_open(ws.root)
+    assert reopened.step("preprocess") is None
+    assert reopened.path("movie.npy").read_bytes() == b"original"
+    assert not reopened.path("summary.npy").exists()

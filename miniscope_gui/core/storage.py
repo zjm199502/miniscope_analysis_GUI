@@ -70,6 +70,10 @@ class MovieReader:
         self.shape = tuple(shape)
         self.dtype = np.dtype(dtype)
         self._frame_bytes = int(np.prod(self.shape[1:])) * self.dtype.itemsize
+        expected = self._offset + self.shape[0] * self._frame_bytes
+        missing = expected - self.path.stat().st_size
+        if missing > 0:
+            raise IOError(f"{self.path} 缺少 {missing} 字节")
         self.ndim = 3
 
     def __len__(self):
@@ -81,7 +85,9 @@ class MovieReader:
         if n:
             with open(self.path, "rb") as f:
                 f.seek(self._offset + a * self._frame_bytes)
-                f.readinto(memoryview(out).cast("B"))
+                received = f.readinto(memoryview(out).cast("B"))
+                if received != out.nbytes:
+                    raise IOError(f"{self.path} 缺少 {out.nbytes - received} 字节")
         return out
 
     def __getitem__(self, key):

@@ -48,7 +48,7 @@ ANALYSES = {
 
 VIEWS = {
     "glm": (("glm_map", "主要编码变量（细胞图）"), ("glm_r2", "解释度 R²"), ("glm_kernel", "事件反应核")),
-    "decoder": (("dec_time", "解码结果随时间"), ("dec_null", "与打乱对比"), ("dec_weights", "细胞权重图")),
+    "decoder": (("dec_time", "解码结果随时间"), ("dec_null", "与打乱对比"), ("dec_weights", "细胞权重图"), ("dec_weights_y", "位置 Y 权重")),
     "ensembles": (("ens_map", "细胞组成员（细胞图）"), ("ens_act", "激活强度"), ("ens_weights", "权重与特征值")),
     "embedding": (("emb_state", "嵌入（按行为着色）"), ("emb_time", "嵌入（按时间着色）")),
     "hmm": (("hmm_states", "状态随时间"), ("hmm_trans", "转移矩阵与轨迹"), ("hmm_cells", "各状态的细胞活动")),

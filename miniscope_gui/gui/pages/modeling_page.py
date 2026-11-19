@@ -248,9 +248,16 @@ class ModelingPage(StepPage):
         else:
             self.need.setText("")
         text = ""
+        if key == "decoder":
+            self.view_buttons[3].hide()
         if st:
             try:
-                text = describe(key, load_result(self.ws, key)["summary"])
+                result = load_result(self.ws, key)
+                if key == "decoder":
+                    position = result["summary"]["target"] == "位置"
+                    self.view_buttons[2].setText("位置 X 权重" if position else "细胞权重图")
+                    self.view_buttons[3].setVisible(position and result["weights"].ndim == 2)
+                text = describe(key, result["summary"])
             except Exception:
                 text = ""
         self.result_lbl.setText(text)

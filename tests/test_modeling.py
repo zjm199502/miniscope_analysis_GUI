@@ -346,3 +346,34 @@ def test_export_all_and_registry(data, tmp_path):
         assert (tmp_path / "out" / f).stat().st_size > 0, f
     head = (tmp_path / "out" / "glm_encoding.csv").read_text(encoding="utf-8-sig").splitlines()[0]
     assert head.startswith("cell_id,cv_r2,p,q_fdr,best_variable")
+
+def test_position_decoder_axes_and_export(tmp_path):
+    rng = np.random.default_rng(35)
+    x = rng.normal(size=(400, 2))
+    fold = np.arange(400) // 80
+    result = decoder.decode(x, x.copy(), fold, False, n_pc=2, n_shuffle=3)
+    weights = result["weights"]
+    assert weights.shape == (2, 2)
+    assert np.all(np.diag(weights) > 10 * np.abs(weights[[0, 1], [1, 0]]))
+    result.update(ids=np.arange(2), summary={"target": "位置"}, times=np.arange(400),
+                  valid=fold >= 0, truth=x)
+    decoder.export_decoder(None, result, tmp_path)
+    path = tmp_path / "decoder_cell_weights.csv"
+    assert path.read_text(encoding="utf-8-sig").splitlines()[0] == "cell_id,weight_x,weight_y"
+    result["weights"] = weights[:, 0]
+    decoder.export_decoder(None, result, tmp_path)
+    assert path.read_text(encoding="utf-8-sig").splitlines()[0] == "cell_id,weight_x"
+
+
+def test_decoder_fold_training_independent_of_test_variance():
+    x = np.random.default_rng(5).normal(size=(100, 4))
+    fold = np.arange(100) // 20
+    base = decoder._Folds(x, fold, 2).items[0]
+    x[fold == 0, 0] *= 1000
+    changed = decoder._Folds(x, fold, 2).items[0]
+    # Training PCA must also be invariant to a change of units in one cell.
+    x[:, 1] *= 100
+    rescaled = decoder._Folds(x, fold, 2).items[0]
+    np.testing.assert_allclose(np.abs(base[4]), np.abs(rescaled[4]))
+    for i in (2, 4, 5):
+        np.testing.assert_array_equal(base[i], changed[i])
