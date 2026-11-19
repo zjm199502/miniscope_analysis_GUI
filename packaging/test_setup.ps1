@@ -1,7 +1,8 @@
 param([Parameter(Mandatory)][string]$Version)
 $ErrorActionPreference = "Stop"
 $setup = (Resolve-Path "dist/CalciLume-Windows-Setup.exe").Path
-$area = Join-Path $env:TEMP ("calcilume-install-test-" + [guid]::NewGuid())
+$scratch = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
+$area = Join-Path $scratch ("calcilume-install-test-" + [guid]::NewGuid())
 $install = Join-Path $area "app"
 New-Item -ItemType Directory -Path $area | Out-Null
 $project = Join-Path $area "project.json"
@@ -15,9 +16,12 @@ foreach ($pass in 1..2) {
     Run-Setup $setup @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=`"$install`"")
     $exe = Join-Path $install "runtime/MiniscopeAnalysis.exe"
     $link = Join-Path ([Environment]::GetFolderPath("Programs")) "CalciLume.lnk"
+    if (!(Test-Path -LiteralPath $link)) { throw "Missing start menu shortcut: $link" }
     $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($link)
-    if ($shortcut.TargetPath -ne $exe) { throw "Start menu shortcut target mismatch" }
-    $p = Start-Process $exe -PassThru
+    $target = $shortcut.TargetPath
+    python -c "import os,sys; assert os.path.samefile(sys.argv[1], sys.argv[2]), sys.argv[1:]" "$target" "$exe"
+    if ($LASTEXITCODE) { throw "Shortcut target '$target', expected '$exe'" }
+    $p = Start-Process -FilePath $target -WorkingDirectory $install -PassThru
     try {
         $deadline = (Get-Date).AddSeconds(60)
         do { Start-Sleep -Milliseconds 300; $p.Refresh() } until ($p.HasExited -or $p.MainWindowTitle -or (Get-Date) -gt $deadline)
