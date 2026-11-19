@@ -29,5 +29,8 @@ miniscope-gui = "miniscope_gui.gui.app:main"
 [tool.setuptools.packages.find]
 include = ["miniscope_gui*"]
 
+[tool.setuptools.package-data]
+miniscope_gui = ["assets/*.png"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

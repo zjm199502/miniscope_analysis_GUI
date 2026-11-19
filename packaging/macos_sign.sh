@@ -24,6 +24,8 @@ NAME="$2"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ENT="$HERE/macos_entitlements.plist"
 
+/usr/bin/plutil -replace CFBundleDisplayName -string "CalciLume 钙荧" "$APP/Contents/Info.plist"
+
 IDENTITY="-"
 NOTARIZE=false
 if [ -n "${MACOS_CERT_P12_BASE64:-}" ]; then
@@ -70,7 +72,7 @@ make_dmg() {
   ditto "$APP" "dmg/$(basename "$APP")"
   ln -s /Applications dmg/Applications
   cp "$HERE/macos_first_open.txt" "dmg/首次打开必读.txt"
-  hdiutil create -volname MiniscopeAnalysis -srcfolder dmg -ov -format UDZO "$NAME.dmg"
+  hdiutil create -volname CalciLume -srcfolder dmg -ov -format UDZO "$NAME.dmg"
   rm -rf dmg
 }
 

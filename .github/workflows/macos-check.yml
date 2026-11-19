@@ -23,9 +23,9 @@ jobs:
       - name: Build .app
         run: |
           pyinstaller --noconfirm --clean --windowed --name MiniscopeAnalysis \
-            --osx-bundle-identifier org.miniscope.analysis \
+            --icon packaging/calcilume.icns --osx-bundle-identifier org.miniscope.analysis \
             --add-data "base_version.txt:." \
-            --collect-submodules miniscope_gui \
+            --collect-submodules miniscope_gui --collect-data miniscope_gui \
             --collect-submodules pyqtgraph --collect-data pyqtgraph \
             --exclude-module numba --exclude-module llvmlite --exclude-module matplotlib \
             --exclude-module tkinter packaging/launcher.py

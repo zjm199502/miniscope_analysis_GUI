@@ -72,13 +72,13 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
       - run: python -m pip install . pyinstaller
-      - run: Set-Content -NoNewline -Encoding ascii base_version.txt "${{ needs.test.outputs.version }}"
+      - run: Set-Content -LiteralPath base_version.txt -NoNewline -Encoding ascii -Value "${{ needs.test.outputs.version }}"
         shell: pwsh
       - name: Build
         run: >
-          pyinstaller --noconfirm --clean --windowed --name MiniscopeAnalysis
+          pyinstaller --noconfirm --clean --windowed --name MiniscopeAnalysis --icon packaging/calcilume.ico
           --add-data "base_version.txt:."
-          --collect-submodules miniscope_gui
+          --collect-submodules miniscope_gui --collect-data miniscope_gui
           --collect-submodules pyqtgraph --collect-data pyqtgraph
           --exclude-module numba --exclude-module llvmlite --exclude-module matplotlib
           --exclude-module tkinter packaging/launcher.py
@@ -101,9 +101,9 @@ jobs:
       - name: Build .app
         run: |
           pyinstaller --noconfirm --clean --windowed --name MiniscopeAnalysis \
-            --osx-bundle-identifier org.miniscope.analysis \
+            --icon packaging/calcilume.icns --osx-bundle-identifier org.miniscope.analysis \
             --add-data "base_version.txt:." \
-            --collect-submodules miniscope_gui \
+            --collect-submodules miniscope_gui --collect-data miniscope_gui \
             --collect-submodules pyqtgraph --collect-data pyqtgraph \
             --exclude-module numba --exclude-module llvmlite --exclude-module matplotlib \
             --exclude-module tkinter packaging/launcher.py

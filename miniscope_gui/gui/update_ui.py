@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, QSettings, Qt, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
 
-from .. import __version__, updater
+from .. import APP_NAME, __version__, updater
 
 CHECK_INTERVAL_S = 24 * 3600
 
@@ -170,5 +170,5 @@ class UpdateManager(QObject):
         base = patching.base_version()
         build = f"（安装包 v{base}，已通过软件内更新升级）" if base and base != __version__ else ""
         QMessageBox.about(self.win, "关于",
-                          f"Miniscope 分析 v{__version__}{build}\n\n"
+                          f"{APP_NAME} v{__version__}{build}\n\n"
                           f"源代码与更新：https://github.com/{updater.REPO}")

@@ -9,8 +9,8 @@ call .build-venv\Scripts\activate.bat
 python -m pip install --upgrade pip
 python -m pip install . pyinstaller || goto :error
 python -c "import miniscope_gui; open('base_version.txt','w').write(miniscope_gui.__version__)" || goto :error
-pyinstaller --noconfirm --clean --windowed --name MiniscopeAnalysis ^
-  --add-data "base_version.txt:." --collect-submodules miniscope_gui ^
+pyinstaller --noconfirm --clean --windowed --name MiniscopeAnalysis --icon packaging/calcilume.ico ^
+  --add-data "base_version.txt:." --collect-submodules miniscope_gui --collect-data miniscope_gui ^
   --collect-submodules pyqtgraph --collect-data pyqtgraph ^
   --exclude-module numba --exclude-module llvmlite --exclude-module matplotlib ^
   --exclude-module tkinter ^

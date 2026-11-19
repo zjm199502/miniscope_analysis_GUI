@@ -3,6 +3,7 @@ import sys
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
+from .. import APP_NAME
 from .main_window import MainWindow
 
 
@@ -10,6 +11,7 @@ def main():
     app = QApplication(sys.argv)
     # Fusion + explicit light palette: looks the same on every PC and avoids
     # unreadable text when Windows is in dark mode.
+    app.setApplicationDisplayName(APP_NAME)
     app.setStyle("Fusion")
     app.setPalette(app.style().standardPalette())
     try:
@@ -22,6 +24,7 @@ def main():
     f.setPointSize(10)
     app.setFont(f)
     w = MainWindow()
+    app.setWindowIcon(w.windowIcon())
     w.show()
     from PySide6.QtCore import QTimer
     QTimer.singleShot(3000, w.updates.maybe_check_on_start)

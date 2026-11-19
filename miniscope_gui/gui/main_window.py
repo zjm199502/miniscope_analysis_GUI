@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (QListWidget, QListWidgetItem, QMainWindow,
                                QMessageBox, QProgressBar, QPushButton,
                                QSplitter, QStackedWidget)
 
-from .. import __version__
+from .. import APP_NAME, __version__
 from ..core.preprocess import MAX_FILE, MEAN_FILE, load_movie
 from .cell_review import CellReview
 from .pages.calcium_pages import BackgroundPage, ExtractionPage, MotionPage, SignalsPage
@@ -30,7 +33,8 @@ REQUIRES = {1: [], 2: ["preprocess"], 3: ["preprocess"], 4: ["background"],
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"Miniscope 分析 v{__version__}")
+        self.setWindowTitle(f"{APP_NAME} v{__version__}")
+        self.setWindowIcon(QIcon(str(Path(__file__).resolve().parents[1] / "assets" / "calcilume.png")))
         self.resize(1400, 900)
         self.session = None
         self.ws = None

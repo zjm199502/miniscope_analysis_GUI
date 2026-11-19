@@ -1,4 +1,6 @@
-# Miniscope 分析软件
+<img src="miniscope_gui/assets/calcilume.png" alt="CalciLume 图标" width="76">
+
+# CalciLume 钙荧
 
 一个轻量化的 miniscope 单光子钙成像分析软件，带中文图形界面，面向教学和日常实验室使用。
 目标是在普通笔记本上跑完整流程，并能和动物行为视频做同步分析。
