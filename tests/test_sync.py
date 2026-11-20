@@ -67,3 +67,11 @@ def test_peri_event():
     axis, segs = peri_event(dff, t, [20.0, 50.0, 80.0, 99.5], pre_s=2, post_s=5)
     assert segs.shape == (3, 2, len(axis))
     assert segs[:, 0, axis >= 0][:, :20].mean() == 1.0 and segs[:, 0, axis < 0].mean() == 0
+
+
+def test_sync_queries_skip_interior_video_clock_gap():
+    from miniscope_gui.core.sync import synced_frame_indices
+
+    clock = [0.0, .1, .2, 1.2, 1.3]
+    frames = synced_frame_indices(clock, [-1, .11, .23, .7, 1.19, 1.3, 2])
+    np.testing.assert_array_equal(frames, [-1, 1, 2, -1, 3, 4, -1])

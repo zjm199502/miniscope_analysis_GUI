@@ -79,3 +79,56 @@ def test_import_dlc(tmp_path):
     tr = import_dlc(p, fps=20)
     assert np.allclose(tr["x"][[0, 5]], [5, 5])   # mean of parts; tail ignored when unlikely
     assert list(tr["bodyparts"]) == ["nose", "tail"]
+
+
+def test_tracking_quality_respects_time_and_gap_boundaries():
+    # Only Y is missing in the short gap, so both coordinates must use the same anchors.
+    x = np.array([8., 0., 200., 2., np.nan, np.nan, np.nan, 90., 90., np.nan])
+    y = np.array([np.nan, 0., np.nan, 2., 1., 2., 3., 90., 90., np.nan])
+    tr = dict(t=np.arange(len(x)) / 10, x=x, y=y)
+    cfg = BehaviorConfig(params={"max_interp_s": .1, "smooth_s": 0})
+    res = analyze(tr, cfg)
+    np.testing.assert_array_equal(res["tracking_quality"], [0, 2, 1, 2, 0, 0, 0, 2, 2, 0])
+    assert res["x"][2] == res["y"][2] == 1
+    assert np.isnan(res["speed"][7]) and res["summary"]["distance"] == np.sqrt(8)
+    assert res["summary"]["tracking_interpolated_pct"] == 10
+    cfg.params.update(max_interp_s=0, smooth_s=.5)
+    res = analyze(tr, cfg)
+    assert res["tracking_quality"][2] == 0 and res["x"][1] == 0 and res["x"][7] == 90
+    assert x[2] == 200 and np.isnan(y[2])
+
+
+def test_dlc_low_confidence_and_unpaired_coordinates(tmp_path):
+    path = tmp_path / "dlc.csv"
+    path.write_text("scorer,D,D,D,D,D,D\nbodyparts,a,a,a,b,b,b\n"
+                    "coords,x,y,likelihood,x,y,likelihood\n"
+                    "0,12,,.9,,13,.9\n1,1,1,NaN,2,2,.2\n2,4,5,.8,3,4,.1\n")
+    tr = import_dlc(path, 10)
+    assert np.isnan(tr["x"][:2]).all() and np.isnan(tr["y"][:2]).all()
+    assert (tr["x"][2], tr["y"][2]) == (4, 5)
+
+
+def test_aligned_quality_and_binned_model_mask(tmp_path):
+    import csv
+    from test_modeling import make_workspace
+    from miniscope_gui.core.behavior import save_track
+    from miniscope_gui.core.modeling.common import load_dataset
+    from miniscope_gui.core.sync import behavior_on_calcium_frames, export_joint
+
+    ws, cfg, _ = make_workspace(tmp_path / "recording", T=100, N=8)
+    cfg.params.update(max_interp_s=.2, smooth_s=0)
+    t = np.arange(100)/10
+    x = t.copy()
+    x[3] = np.nan
+    x[9:16] = np.nan
+    save_track(ws, t=t, x=x, y=t)
+    b = behavior_on_calcium_frames(ws, cfg)
+    assert b["tracking_quality"][3] == 1 and np.all(b["tracking_quality"][9:16] == 0)
+    assert b["behavior_frame"][10] == 10 and not b["valid"][10]
+    ds = load_dataset(ws, cfg)
+    assert ds.beh["tracking_quality"][1] == 1 and not ds.valid[4]
+    assert np.isnan(ds.beh["x"][4])
+    folder = export_joint(ws, cfg)
+    with (folder / "aligned_frames.csv").open(encoding="utf-8-sig") as f:
+        rows = list(csv.DictReader(f))
+    assert rows[3]["tracking_quality"] == "interpolated" and rows[10]["tracking_quality"] == "invalid"

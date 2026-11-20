@@ -156,6 +156,7 @@ class TrackingParams:
     freeze_threshold: float = 0.10  # % of arena pixels changing
     freeze_min_s: float = 1.0
     smooth_s: float = 0.2         # position smoothing window
+    max_interp_s: float = 0.5     # longest missing interval to interpolate between observations
 
 
 @dataclass
@@ -302,12 +303,7 @@ def load_track(ws: Workspace) -> dict:
 
 
 # ---------------------------------------------------------------- analysis
-def _interp_nans(v):
-    v = v.astype(float).copy()
-    ok = np.isfinite(v)
-    if ok.sum() >= 2:
-        v[~ok] = np.interp(np.flatnonzero(~ok), np.flatnonzero(ok), v[ok])
-    return v
+TRACKING_QUALITY_LABELS = np.array(["invalid", "interpolated", "observed"])
 
 
 def _smooth(v, n):
@@ -327,27 +323,55 @@ def bouts(mask: np.ndarray, min_len: int) -> list[tuple[int, int]]:
     return [(int(a), int(b)) for a, b in zip(starts, stops) if b - a >= min_len]
 
 
+def _tracked_positions(track, t, fps, params):
+    x = np.asarray(track["x"], float).copy()
+    y = np.asarray(track["y"], float).copy()
+    observed = np.isfinite(x) & np.isfinite(y)
+    quality = observed.astype(np.uint8) * 2
+    x[~observed] = y[~observed] = np.nan
+    if not np.isfinite(params.max_interp_s) or params.max_interp_s < 0:
+        raise ValueError("最长插值时间必须为非负有限值")
+    for a, b in bouts(~observed, 1):
+        if a == 0 or b == len(t) or params.max_interp_s == 0:
+            continue
+        # Missing duration excludes one normal sampling interval between the anchors.
+        if t[b] - t[a-1] - 1 / fps <= params.max_interp_s + 1e-9:
+            for values in (x, y):
+                values[a:b] = np.interp(t[a:b], t[[a-1, b]], values[[a-1, b]])
+            quality[a:b] = 1
+    window = max(1, int(round(params.smooth_s * fps)))
+    for a, b in bouts(quality > 0, 1):
+        x[a:b] = _smooth(x[a:b], window)
+        y[a:b] = _smooth(y[a:b], window)
+    return x, y, quality
+
+
 def analyze(track: dict, cfg: BehaviorConfig) -> dict:
     """Per-frame behaviour variables and session summary."""
     p = TrackingParams(**cfg.params)
-    t = track["t"]
+    t = np.asarray(track["t"], float)
+    if not len(t) or not np.isfinite(t).all() or np.any(np.diff(t) <= 0):
+        raise ValueError("行为记录需要非空、有限且严格递增的时间戳")
     fps = 1.0 / np.median(np.diff(t)) if len(t) > 1 else cfg.fps
     unit = "cm" if cfg.px_per_cm else "px"
     k = 1.0 / cfg.px_per_cm if cfg.px_per_cm else 1.0
-    n_s = max(1, int(round(p.smooth_s * fps)))
-    xs = _smooth(_interp_nans(track["x"]), n_s)
-    ys = _smooth(_interp_nans(track["y"]), n_s)
+    xs, ys, quality = _tracked_positions(track, t, fps, p)
+    valid = quality > 0
     step = np.hypot(np.diff(xs), np.diff(ys)) * k
-    step = np.concatenate([[0.0], step])
+    step = np.r_[0.0 if valid[0] else np.nan, step]
     if track.get("units") is not None and str(track["units"]) == "cm":
         unit = "cm"
-    speed = step * fps
+    speed = step / np.r_[1.0 / fps, np.diff(t)]
 
     # x/y stay in pixels (for drawing); x_u/y_u are in the reported unit
-    out = {"t": t, "x": xs, "y": ys, "x_u": xs * k, "y_u": ys * k, "speed": speed, "unit": unit}
+    out = {"t": t, "x": xs, "y": ys, "x_u": xs * k, "y_u": ys * k, "speed": speed, "unit": unit,
+           "tracking_quality": quality, "valid": valid}
     summary = {"duration_s": float(t[-1] - t[0]) if len(t) > 1 else 0.0,
-               "distance": float(np.nansum(step)), "mean_speed": float(np.nanmean(speed)),
+               "distance": float(np.nansum(step)) if valid.any() else float("nan"),
+               "mean_speed": float(np.nanmean(speed)) if np.isfinite(speed).any() else float("nan"),
                "unit": unit}
+    for code, label in enumerate(TRACKING_QUALITY_LABELS):
+        summary[f"tracking_{label}_pct"] = float(100 * np.mean(quality == code))
 
     if "freezing" in track:     # imported freezing state
         freezing = track["freezing"].astype(bool)
@@ -385,13 +409,14 @@ def export_behavior(ws: Workspace, cfg: BehaviorConfig, folder: str | Path | Non
     out.mkdir(parents=True, exist_ok=True)
     u = res["unit"]
     cols = {"time_s": res["t"], f"x_{u}": res["x_u"], f"y_{u}": res["y_u"],
-            f"speed_{u}_per_s": res["speed"]}
+            f"speed_{u}_per_s": res["speed"],
+            "tracking_quality": TRACKING_QUALITY_LABELS[res["tracking_quality"]]}
     if "motion" in res:
         cols["motion_index_pct"] = res["motion"]
     if "freezing" in res:
         cols["freezing"] = res["freezing"].astype(int)
     for name, inside in res["zones"].items():
-        cols[f"in_{name}"] = inside.astype(int)
+        cols[f"in_{name}"] = np.where(res["valid"], inside.astype(int).astype(str), "")
     with open(out / "behavior_frames.csv", "w", newline="", encoding="utf-8-sig") as f:
         wr = csv.writer(f)
         wr.writerow(cols.keys())
@@ -486,12 +511,15 @@ def import_dlc(path: str | Path, fps: float, bodypart: str | None = None, min_li
         cy = next(i for i in ix if coords[i] == "y")
         cl = next((i for i in ix if coords[i] == "likelihood"), None)
         x, y = data[:, cx].copy(), data[:, cy].copy()
+        bad = ~np.isfinite(x) | ~np.isfinite(y)
         if cl is not None:
-            bad = data[:, cl] < min_likelihood
-            x[bad] = np.nan; y[bad] = np.nan
+            bad |= ~np.isfinite(data[:, cl]) | (data[:, cl] < min_likelihood)
+        x[bad] = np.nan; y[bad] = np.nan
         xs.append(x); ys.append(y)
-    with np.errstate(all="ignore"):
-        x = np.nanmean(np.stack(xs), 0); y = np.nanmean(np.stack(ys), 0)
+    counts = np.isfinite(xs).sum(axis=0)
+    divisor = np.where(counts == 0, np.nan, counts)
+    x = np.nansum(xs, axis=0) / divisor
+    y = np.nansum(ys, axis=0) / divisor
     return {"t": np.arange(len(x)) / fps, "x": x, "y": y, "bodyparts": np.array(names)}
 
 

@@ -46,7 +46,7 @@ class Dataset:
 
     @property
     def valid(self):
-        """Bins that lie inside the behaviour recording (all bins if no behaviour)."""
+        """Bins fully covered by usable tracking (all bins if no behaviour)."""
         return self.beh.get("valid", np.ones(self.n_bins, bool))
 
 
@@ -95,11 +95,13 @@ def load_dataset(ws: Workspace, cfg=None, bin_s: float = 0.2) -> Dataset:
     if cfg is not None and has_behavior(ws):
         from ..sync import behavior_on_calcium_frames
         b = behavior_on_calcium_frames(ws, cfg)
-        valid = _bin_mean(b["valid"].astype(float), n) > 0.999
-        beh = {"valid": valid, "unit": b["unit"]}
+        quality = b["tracking_quality"][:ds.n_bins * n].reshape(ds.n_bins, n).min(axis=1)
+        valid = quality > 0
+        beh = {"valid": valid, "tracking_quality": quality, "unit": b["unit"]}
         for k in ("speed", "x_u", "y_u", "x", "y"):
             if k in b:
                 v = _bin_mean(b[k], n)
+                v[~valid] = np.nan
                 beh[k] = v
         if "freezing" in b:
             beh["freezing"] = (_bin_mean(b["freezing"].astype(float), n) >= 0.5) & valid

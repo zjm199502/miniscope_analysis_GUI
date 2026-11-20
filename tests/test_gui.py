@@ -349,3 +349,36 @@ def test_study_replay_uses_sync_clock(tmp_path, app):
     w.studies_page.replay.click()
     assert w.view.slider.value() == 11 and w.view.timer.isActive()
     w.close()
+
+
+def test_trial_heatmap_row_opens_synced_frame(tmp_path, app):
+    import csv
+    from miniscope_gui.gui.main_window import MainWindow
+    from test_modeling import make_workspace
+
+    raw = tmp_path / "raw"
+    make_fake_v4(raw, n_frames=100, frames_per_file=100, size=(64, 64))
+    ws, _, _ = make_workspace(tmp_path / "workspace", T=500, N=8)
+    source = tmp_path / "experiment.csv"
+    source.write_text("animal_id,trial_id,cue_s,outcome_s,outcome\n"
+                      "MouseA,011,3.0,4.0,reward\nMouseA,012,5.0,6.0,miss\n")
+    w = MainWindow()
+    w.import_page.load_source(str(raw))
+    w.import_page.set_output(str(ws.root))
+    w.beh_page._open_video(str(raw / "0.avi"))
+    w.steps.setCurrentRow(10)
+    page = w.studies_page
+    page.mode.setCurrentIndex(page.modes.index("trials"))
+    page.cell.setCurrentIndex(page.cell.findData(1))
+    page.trial_path.setText(str(source))
+    page.run_btn.click()
+    _wait(app, w)
+    assert page.trial_view.table.item(1, 0).text() == "012"
+    page.trial_view.table.cellClicked.emit(1, 2)
+    assert w.view.slider.value() == 50 and w.view.timer.isActive()
+    assert "MouseA" in page.trial_view.details.text()
+    with (page.folder / "trials.csv").open(encoding="utf-8-sig") as f:
+        row = list(csv.DictReader(f))[1]
+    assert (row["animal_id"], row["trial_id"], row["cell_id"]) == ("MouseA", "012", "1")
+    w.close()
+    assert page.trial_view.table.rowCount() == 0 and not page.trial_view.rows

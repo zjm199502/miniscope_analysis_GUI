@@ -289,20 +289,40 @@ def run_manual_sync(session, ws: Workspace, args: dict, progress=None, should_st
 
 
 # ----------------------------------------------------------- joint analysis
+def synced_frame_indices(frame_times, requested):
+    """Nearest video frames; leave times outside coverage or within a clock gap unmapped."""
+    t = np.asarray(frame_times, dtype=float)
+    q = np.asarray(requested, dtype=float)
+    if not len(t):
+        return np.full(q.shape, -1, dtype=int)
+    if not np.isfinite(t).all() or np.any(np.diff(t) <= 0):
+        raise ValueError("同步帧时间无效，请重新对齐行为视频")
+    right = np.searchsorted(t, q).clip(0, len(t) - 1)
+    left = np.maximum(right - 1, 0)
+    idx = np.where(abs(t[right] - q) < abs(t[left] - q), right, left)
+    inside = np.isfinite(q) & (q >= t[0]) & (q <= t[-1])
+    if len(t) > 1:
+        dt = np.median(np.diff(t))
+        gap = t[right] - t[left] > 1.6 * dt
+        inside &= ~gap | (abs(t[idx] - q) <= .5 * dt + 1e-9)
+    return np.where(inside, idx, -1)
+
+
 def behavior_on_calcium_frames(ws: Workspace, cfg) -> dict:
     """Resample behaviour variables onto the calcium frame times."""
     from .behavior import analyze, load_track
-    from .signals import load_signals
-    sig = load_signals(ws)
-    tc = sig["times"]
+    from .signals import SIGNALS_FILE
+    with np.load(ws.path(SIGNALS_FILE)) as sig:
+        tc = sig["times"]
     tb = load_sync(ws)
     res = analyze(load_track(ws), cfg)
     n_b = len(res["t"])
     tb = tb[:n_b]
-    idx = np.round(np.interp(tc, tb, np.arange(len(tb)), left=-1, right=-1)).astype(int)
-    valid = idx >= 0
-    out = {"times": tc, "valid": valid, "behavior_frame": idx}
+    idx = synced_frame_indices(tb, tc)
     j = np.clip(idx, 0, n_b - 1)
+    quality = np.where(idx >= 0, res["tracking_quality"][j], 0).astype(np.uint8)
+    valid = quality > 0
+    out = {"times": tc, "valid": valid, "behavior_frame": idx, "tracking_quality": quality}
     for key in ("x", "y", "x_u", "y_u", "speed", "motion"):
         if key in res:
             v = res[key][j].astype(float)
@@ -337,6 +357,8 @@ def state_modulation(dff, state, valid, n_shuffle=500, seed=0):
 def speed_correlation(dff, speed, valid, n_shuffle=500, seed=0):
     rng = np.random.default_rng(seed)
     ok = valid & np.isfinite(speed)
+    if ok.sum() < 2 or np.ptp(speed[ok]) == 0:
+        return {k: np.full(dff.shape[0], np.nan) for k in ("r", "p")}
     X = dff[:, ok]
     v = speed[ok]
     vz = (v - v.mean()) / (v.std() or 1)
@@ -388,6 +410,7 @@ def _cell(v):
 def export_joint(ws: Workspace, cfg, folder=None) -> Path:
     """Per-frame table with calcium + behaviour, and per-cell modulation stats."""
     import csv
+    from .behavior import TRACKING_QUALITY_LABELS
     from .extraction import load_cells
     from .signals import load_signals
     out = Path(folder) if folder else ws.path("export")
@@ -397,7 +420,8 @@ def export_joint(ws: Workspace, cfg, folder=None) -> Path:
     ids = np.where(acc)[0]
     dff = sig["dff"][acc]
     b = behavior_on_calcium_frames(ws, cfg)
-    cols = {"time_s": b["times"], "behavior_frame": b["behavior_frame"]}
+    cols = {"time_s": b["times"], "behavior_frame": b["behavior_frame"],
+            "tracking_quality": TRACKING_QUALITY_LABELS[b["tracking_quality"]]}
     u = b["unit"]
     cols[f"x_{u}"], cols[f"y_{u}"] = b["x_u"], b["y_u"]
     cols[f"speed_{u}_per_s"] = b["speed"]

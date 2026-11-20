@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtWidgets import (QButtonGroup, QFileDialog, QGridLayout, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QListWidget, QMessageBox,
                                QPushButton, QRadioButton)
@@ -16,6 +16,7 @@ from ...core.behavior import (BehaviorConfig, BehaviorVideo, Shape, TrackingPara
 from ...core.sync import LedParams, run_led_sync, run_manual_sync
 from .base import StepPage
 from .common import heading, hint
+from .quality_timeline import QUALITY_COLORS, QUALITY_LABELS, QualityTimeline
 
 ROI_PEN = pg.mkPen((255, 200, 0), width=2)
 ZONE_COLORS = [(0, 200, 255), (255, 120, 200), (120, 255, 120), (255, 160, 60), (180, 140, 255)]
@@ -129,8 +130,22 @@ class BehaviorPage(StepPage):
                                          "灰度变化超过这个值才算该像素在动，用来忽略相机噪声。")
         self.proc_scale = self.add_param("处理分辨率", self.combo(["1/2（推荐）", "原始", "1/4"]),
                                          "降低分辨率可以加快追踪，对位置精度影响很小。")
+        self.max_interp = self.add_param(
+            "最大插值时长", self.dspin(0, 3600, TrackingParams().max_interp_s, .1, 3, " 秒"),
+            "只补两端都有观测的短缺口。设为 0 可关闭插值。修改后立即更新当前轨迹统计。")
+        self.max_interp.setKeyboardTracking(False)
+        self.max_interp.valueChanged.connect(self._set_gap_limit)
 
     def build_extra(self):
+        self.quality_title = heading("追踪质量")
+        self.lay.addWidget(self.quality_title)
+        self.timeline = QualityTimeline()
+        self.timeline.sampleSelected.connect(self._replay_quality)
+        self.lay.addWidget(self.timeline)
+        self.quality_stats = QLabel()
+        self.quality_stats.setWordWrap(True)
+        self.lay.addWidget(self.quality_stats)
+        self._clear_quality()
         self.lay.addWidget(heading("导入其他软件的结果"))
         self.lay.addWidget(hint("不用本软件追踪时，可以导入 EthoVision XT 导出的原始数据"
                                 "（txt / csv / xlsx，含 Trial time、X center、Y center，"
@@ -153,8 +168,11 @@ class BehaviorPage(StepPage):
     # ------------------------------------------------------------ context
     def on_context(self):
         cfg = BehaviorConfig.load(self.ws) if self.ws else None
+        with QSignalBlocker(self.max_interp):
+            self.max_interp.setValue((cfg.params if cfg else {}).get("max_interp_s", TrackingParams().max_interp_s))
         if cfg:
             self.cfg = cfg
+            self.fps.setValue(cfg.fps)
             if cfg.video and Path(cfg.video).exists():
                 self._open_video(cfg.video, cfg.fps, keep_cfg=True)
             p = TrackingParams(**cfg.params)
@@ -173,6 +191,8 @@ class BehaviorPage(StepPage):
 
     def release_project(self):
         self.cancel_edit()
+        self._clear_quality()
+        self.summary.clear()
         if self.video is not None:
             self.video.close()
             self.video = None
@@ -296,6 +316,40 @@ class BehaviorPage(StepPage):
             v.add_overlay(shape_to_item(Shape.from_dict(z), ZONE_COLORS[i % len(ZONE_COLORS)]))
 
     # ------------------------------------------------------------- running
+    def _set_gap_limit(self, seconds):
+        self.cfg.params["max_interp_s"] = seconds
+        if self.ws:
+            self.cfg.save(self.ws)
+            self._update_summary()
+
+    def set_running(self, running):
+        super().set_running(running)
+        self.max_interp.setEnabled(not running)
+
+    def _clear_quality(self):
+        self.timeline.clear()
+        self.quality_stats.clear()
+        for widget in (self.quality_title, self.timeline, self.quality_stats):
+            widget.hide()
+
+    def _replay_quality(self, index):
+        time = self.timeline.times[index]
+        state = QUALITY_LABELS[self.timeline.quality[index]]
+        msg = f"行为时间 {time:.3f} 秒 · {state}"
+        if self.video is None:
+            self.main.statusBar().showMessage(msg + "（载入对应行为视频后可回放）")
+            return
+        # A matching frame count gives a direct correspondence even at variable
+        # frame rates. External lower-rate tracks use the trial time in seconds.
+        frame = index if len(self.timeline.times) == self.video.n_frames else round(time * self.video.fps)
+        if not 0 <= frame < self.video.n_frames:
+            self.main.statusBar().showMessage(msg + "（此时刻超出视频范围）")
+            return
+        self.show_video()
+        self.main.view.slider.setValue(frame)
+        self.main.view.toggle_play()
+        self.main.statusBar().showMessage(msg)
+
     def params(self):
         self.cfg.fps = self.fps.value()
         scale = {0: 0.5, 1: 1.0, 2: 0.25}[self.proc_scale.currentIndex()]
@@ -342,14 +396,23 @@ class BehaviorPage(StepPage):
 
     def _update_summary(self):
         if not (self.ws and self.ws.step("behavior")):
+            self._clear_quality()
             self.summary.setText("")
             return
         try:
             res = analyze(load_track(self.ws), self.params())
         except Exception as e:
+            self._clear_quality()
             self.summary.setText(f"无法计算统计结果：{e}")
             return
         s, u = res["summary"], res["unit"]
+        self.timeline.set_samples(res["t"], res["tracking_quality"])
+        self.quality_stats.setText("　".join(
+            f'<span style="color:{QUALITY_COLORS[code]}">■</span> {QUALITY_LABELS[code]} '
+            f'{s["tracking_" + key + "_pct"]:.1f}%'
+            for code, key in ((2, "observed"), (1, "interpolated"), (0, "invalid"))))
+        for widget in (self.quality_title, self.timeline, self.quality_stats):
+            widget.show()
         lines = [f"时长 {s['duration_s']:.1f} 秒，总路程 {s['distance']:.1f} {u}，平均速度 {s['mean_speed']:.2f} {u}/s"]
         if "freezing_percent" in s:
             lines.append(f"僵直 {s['freezing_percent']:.1f}%，共 {s['freezing_bouts']} 次，"

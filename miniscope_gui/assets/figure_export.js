@@ -40,6 +40,15 @@ function figure(charts, cols) {
         ctx.fillRect(i,j,1,1);
       }));
       element(g,'image',{x:left,y:top,width:w,height:hh,preserveAspectRatio:'none',href:canvas.toDataURL(),style:'image-rendering:pixelated'});
+      if(c.trial_rows){
+        const outcomes=[...new Set(c.trial_rows.map(row=>row.outcome))];
+        c.trial_rows.forEach((row,j)=>{
+          const tag=element(g,'rect',{x:left+w+3,y:top+hh*j/ny,width:10,height:hh/ny,
+            fill:colors[outcomes.indexOf(row.outcome)%colors.length]});
+          element(tag,'title',{},row.animal_id+' · '+row.trial_id+' · '+row.outcome);
+        });
+        if(outcomes.length<=4)outcomes.forEach((label,i)=>txt(12+i*90,274,'● '+label,11,{fill:colors[i%4]}));
+      }
       if(c.marker)txt(left+c.marker[0]*w,top+c.marker[1]*hh,'★',20,{'text-anchor':'middle','dominant-baseline':'central',fill:'white',stroke:'#232e34','stroke-width':1,'paint-order':'stroke'});
       txt(12,251,'色阶 '+lo.toPrecision(3)+' — '+hi.toPrecision(3)+'     灰色 · 缺测');
     } else {
@@ -99,8 +108,14 @@ async function download(charts,svg,name){
     try{img.src=url;await img.decode();const cv=document.createElement('canvas');cv.width=Math.round(mm/25.4*300);cv.height=Math.round(cv.width*vb.height/vb.width);cv.getContext('2d').drawImage(img,0,0,cv.width,cv.height);
     const blob=await new Promise(ok=>cv.toBlob(ok));bytes=new Uint8Array(await blob.arrayBuffer());}finally{URL.revokeObjectURL(url)}
   }
-  const csv=[['panel','title','series_or_row','column','x','value']];
-  charts.forEach((c,k)=>c.data.forEach((row,j)=>row.forEach((v,i)=>csv.push([k+1,c.title,c.labels?.[j]??j,i,(c.kind==='path'?c.x[j]:c.x)?.[i]??i,v??'']))));
+  const trialFields=charts.some(c=>c.trial_rows)
+    ? ['animal_id','trial_id','cell_id','source_row','outcome','event_s','coverage','observed_fraction','interpolated_fraction','invalid_fraction','outside_tracking_fraction'] : [];
+  const csv=[['panel','title','series_or_row','column','x','value',...trialFields]];
+  charts.forEach((c,k)=>c.data.forEach((row,j)=>{
+    const trial=c.trial_rows?.[j];
+    const fields=trialFields.map(key=>trial?.[key]??'');
+    row.forEach((v,i)=>csv.push([k+1,c.title,c.labels?.[j]??j,i,(c.kind==='path'?c.x[j]:c.x)?.[i]??i,v??'',...fields]));
+  }));
   const quote=v=>'"'+String(v).replaceAll('"','""')+'"';
   const stem=name.replace(/[\\/:*?"<>|]/g,'_');
   const meta={study:r.title,run:r.run,parameters:r.params,group:sel.value,width_mm:$('width').value,charts:charts.map(({data,...settings})=>settings)};
