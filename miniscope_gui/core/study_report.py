@@ -49,6 +49,7 @@ class Report:
         axes="",
         bounds=None,
         band=None,
+        **style,
     ):
         self.charts.append(
             dict(
@@ -61,6 +62,7 @@ class Report:
                 axes=axes,
                 bounds=bounds,
                 band=band,
+                **style,
             )
         )
 
@@ -90,8 +92,10 @@ def freeze_report(out, r, folder, sync):
                 group=name,
                 axes="横轴 秒 · 纵轴 匹配对",
                 bounds=limits,
-                band=band,
+                panel=True, zero=True, band=band,
             )
+        out.add(name + " · 群体平均响应", heat.mean(axis=0), x=times, group=name,
+                axes="秒 / 平均 ΔF/F", labels=["僵直", "普通停顿"], panel=True, zero=True, band=band)
         out.add(
             name + " · 留出匹配对准确率",
             [r[key + "_accuracy"]],
@@ -167,6 +171,12 @@ def wall_report(out, r, folder):
 
 def goal_report(out, r, folder, n):
     rows = []
+    stages = len(r["schedule"])
+    limits = []
+    for cell in range(len(r["cells"])):
+        values = np.concatenate([r[f"place_{k}"][cell] for k in range(stages)])
+        finite = values[np.isfinite(values)]
+        limits.append([finite.min(), finite.max()] if finite.size else None)
     for k, (start, x, y) in enumerate(r["schedule"]):
         group = f"阶段 {k + 1}"
         out.add(
@@ -191,7 +201,8 @@ def goal_report(out, r, folder, n):
                 r[f"place_{k}"][i].reshape(n, n),
                 "heat",
                 group=g,
-                axes="场地网格 / ΔF/F",
+                axes="场地网格 / ΔF/F · ★ 目标", panel=True, bounds=limits[i],
+                marker=r["markers"][k], aspect=r["aspect"],
             )
             out.add(
                 f"{group} · 距目标中心",
@@ -205,6 +216,10 @@ def goal_report(out, r, folder, n):
                     (k + 1, start, x, y, cell, key, j, r[f"{key}_seconds_{k}"][j], v)
                     for j, v in enumerate(r[f"{key}_{k}"][i])
                 )
+    for i, cell in enumerate(r["cells"]):
+        out.add("各阶段距目标调谐", [r[f"distance_{k}"][i] for k in range(stages)],
+                x=distance, group=f"细胞 {cell}", labels=[f"阶段 {k+1}" for k in range(stages)],
+                axes=r["unit"]+" / ΔF/F", panel=True)
     table(
         folder / "target_tuning.csv",
         "epoch,start_s,target_x_px,target_y_px,cell_id,coordinate,bin,seconds,mean_dff",
@@ -236,8 +251,13 @@ def day_report(out, r, folder, n):
         "训练日 × 测试日中位误差",
         r["errors"],
         "heat",
-        axes="纵轴训练日 / 横轴测试日；天序：" + "、".join(names),
+        panel=True, axes="纵轴训练日 / 横轴测试日；天序：" + "、".join(names),
     )
+    pairs = [row for row in r["pairs"] if row[0] != row[1]]
+    for a,b,count,_,error,baseline in pairs:
+        out.add(f"{names[a]} → {names[b]} · {count} 个细胞", [[error, baseline]],
+                axes="归一化位置误差", bounds=[0,max(max(row[-2:]) for row in pairs)],
+                points=True, panel=True)
     table(
         folder / "crossday.csv",
         "training_day,test_day,shared_cells,test_samples,median_error,within_test_day_error",
@@ -312,12 +332,12 @@ def run_study(session, ws, args, progress=None, should_stop=None):
             note = goal_report(out, r, folder, n)
         else:
             note = wall_report(out, r, folder)
-        payload = plain({"title": args["title"], "note": note, "charts": out.charts})
+        payload = plain({"title": args["title"], "note": note, "params": args, "run": final.name, "charts": out.charts})
         raw = json.dumps(
             payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")
         ).replace("<", "\\u003c")
         (folder / "report.html").write_text(
-            TEMPLATE.replace("__PAYLOAD__", raw), encoding="utf-8"
+            TEMPLATE.replace("__SCRIPT__", (Path(__file__).resolve().parents[1] / "assets" / "figure_export.js").read_text("utf8")).replace("__PAYLOAD__", raw), encoding="utf-8"
         )
         (folder / "data.json").write_text(
             json.dumps(plain(r), ensure_ascii=False, allow_nan=False), encoding="utf-8"
@@ -329,25 +349,8 @@ def run_study(session, ws, args, progress=None, should_stop=None):
 
 
 TEMPLATE = """<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>body{font:16px system-ui;color:#17363b;background:#f6f8f7;max-width:1100px;margin:32px auto;padding:0 16px}select{padding:6px;font:inherit}main{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:14px;margin-top:16px}article{background:white;padding:14px;border:1px solid #d9e1df}canvas{width:100%}small{display:block}h3{margin:0 0 8px}</style>
-<h1></h1><p id="note"></p><label>查看 <select></select></label><main></main>
-<script>const r=__PAYLOAD__, sel=document.querySelector('select'), main=document.querySelector('main');
-document.title=document.querySelector('h1').textContent=r.title;note.textContent=r.note;
-for(const g of new Set(r.charts.map(c=>c.group||'总览')))sel.add(new Option(g,g));
-const colors=['#147e79','#cf702d','#7058a5','#4279ad'];
-function extent(v){let a=Infinity,b=-Infinity;for(const x of v)if(Number.isFinite(x)){a=Math.min(a,x);b=Math.max(b,x)}return a===Infinity?[0,1]:[a,b]}
-function draw(c){const card=document.createElement('article');main.append(card);const h=document.createElement('h3');h.textContent=c.title;card.append(h);
-const cv=document.createElement('canvas');cv.width=600;cv.height=300;card.append(cv);const ctx=cv.getContext('2d'),L=46,T=12,W=534,H=247;
-const [lo,hi]=c.bounds||extent(c.data.flat());const range=hi-lo||1;
-const pos=(v,a,b)=> (v-a)/(b-a||1);
-let xmin=0,xmax=c.data[0].length-1;if(c.x)[xmin,xmax]=extent(c.x.flat());
-if(c.kind==='heat'){let ny=c.data.length,nx=c.data[0].length;
-for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){let v=c.data[j][i],u=(v-lo)/range;ctx.fillStyle=v==null?'#ddd':'hsl('+(235-195*u)+' 63% '+(28+32*u)+'%)';ctx.fillRect(L+W*i/nx,T+H*j/ny,W/nx+.35,H/ny+.35)}
-}else{c.data.forEach((ys,j)=>{const xs=c.kind==='path'?c.x[j]:c.x;ctx.strokeStyle=colors[j%4];ctx.lineWidth=2.3;ctx.beginPath();let start=true;
-ys.forEach((v,i)=>{if(v==null){start=true;return}let x=L+W*pos(xs?xs[i]:i,xmin,xmax),y=T+H*(1-(v-lo)/range);if(start)ctx.moveTo(x,y);else ctx.lineTo(x,y);start=false;if(i===0&&c.kind==='path'){ctx.fillStyle=colors[j%4];ctx.fillRect(x-3,y-3,6,6)}});ctx.stroke()})}
-if(c.band!=null&&xmax>xmin){let a=Math.max(xmin,-c.band),b=Math.min(xmax,c.band);ctx.fillStyle='#6663';ctx.fillRect(L+W*pos(a,xmin,xmax),T,W*(b-a)/(xmax-xmin),H);ctx.strokeStyle='#333';ctx.beginPath();ctx.moveTo(L+W*pos(0,xmin,xmax),T);ctx.lineTo(L+W*pos(0,xmin,xmax),T+H);ctx.stroke()}
-ctx.strokeStyle='#8fa19c';ctx.strokeRect(L,T,W,H);ctx.font='15px sans-serif';ctx.fillStyle='#264544';ctx.fillText(xmin.toFixed(1),L,T+H+20);ctx.fillText(xmax.toFixed(1),L+W-30,T+H+20);
-if(c.kind!=='heat'){ctx.fillText(hi.toFixed(2),1,T+8);ctx.fillText(lo.toFixed(2),1,T+H)}
-const info=document.createElement('small');info.textContent=c.axes+(c.kind==='heat'?' · 色阶 '+lo.toPrecision(3)+' 至 '+hi.toPrecision(3)+'，灰色为缺测':'');card.append(info);
-(c.labels||[]).forEach((l,i)=>{let el=document.createElement('span');el.style.color=colors[i%4];el.textContent=' ● '+l;card.append(el)})}
-function show(){main.replaceChildren();r.charts.filter(c=>(c.group||'总览')===sel.value).forEach(draw)}sel.onchange=show;show();</script></html>"""
+<style>body{font:15px system-ui;background:#f3f6f5;color:#203a42;margin:24px auto;max-width:1000px;padding:0 16px}select,button{font:inherit;padding:6px;margin:4px}article{margin:14px 0;background:white;padding:12px;width:fit-content;max-width:100%}svg{display:block;width:var(--width);max-width:100%;height:auto}@media print{body{background:white;margin:0;padding:0}body>*:not(main),article:not(.printing),button{display:none}article{padding:0;margin:0}}</style>
+<h1 id="title"></h1><p id="note"></p><label>查看<select id="group"></select></label>
+<label>图宽<select id="width"><option>180</option><option>90</option></select> mm</label>
+<label>格式<select id="format"><option value="svg">SVG · 论文</option><option value="png">PNG · 组会</option><option value="pdf">PDF · 打印到文件</option></select></label>
+<main id="plots"></main><script>const r=__PAYLOAD__;__SCRIPT__</script></html>"""

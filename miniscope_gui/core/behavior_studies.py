@@ -230,7 +230,10 @@ def target(ds, cfg, schedule, n):
     dist = np.linalg.norm(xy - schedule[epoch, 1:], axis=1) / (cfg.px_per_cm or 1)
     edges = np.linspace(0, max(dist[valid].max(), 1e-8), n + 1)
     dbin = digitize(dist, edges)
+    _, origin, span = bounds(cfg)
     out = {
+        "markers": (schedule[:, 1:] - origin) / span,
+        "aspect": span[0] / span[1],
         "cells": ds.ids,
         "schedule": schedule,
         "edges": edges,
