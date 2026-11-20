@@ -20,11 +20,12 @@ from .pages.behavior_pages import BehaviorPage, SyncPage
 from .pages.modeling_page import ModelingPage
 from .pages.preprocess_page import PreprocessPage
 from .pages.registration_page import RegistrationPage
+from .pages.studies_page import StudiesPage
 from .video_view import VideoView
 from .worker import start_worker
 
 STEP_NAMES = ["导入数据", "预处理", "运动校正", "去除背景", "细胞提取", "信号与 spike",
-              "行为分析", "同步分析", "建模分析", "跨天配准"]
+              "行为分析", "同步分析", "建模分析", "跨天配准", "行为与空间专题"]
 # step index -> workspace steps that must exist before it can be opened
 REQUIRES = {1: [], 2: ["preprocess"], 3: ["preprocess"], 4: ["background"],
             5: ["extraction"], 6: [], 7: ["behavior"], 8: ["signals"], 9: []}
@@ -133,7 +134,8 @@ class MainWindow(QMainWindow):
         self.sync_page = SyncPage(self)
         self.model_page = ModelingPage(self)
         self.reg_page = RegistrationPage(self)
-        return [self.beh_page, self.sync_page, self.model_page, self.reg_page]
+        self.studies_page = StudiesPage(self)
+        return [self.beh_page, self.sync_page, self.model_page, self.reg_page, self.studies_page]
 
     def refit_page(self):
         """Re-fit the right panel after a page changed its own height."""
@@ -652,6 +654,7 @@ class MainWindow(QMainWindow):
         self.trace.hide()
         self.view.release_project()
         self.beh_page.release_project()
+        self.studies_page.release_project()
         if self.sync_page.led_roi is not None:
             self.view.vb.removeItem(self.sync_page.led_roi)
             self.sync_page.led_roi = None

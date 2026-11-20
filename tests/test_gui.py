@@ -299,3 +299,53 @@ def test_release_running_project(tmp_path, app, close):
             w.import_page.set_output(str(tmp_path / path))
         assert w.ws.root == tmp_path / "two"
         w.close()
+
+
+def test_studies_desktop_report(tmp_path, app):
+    from miniscope_gui.gui.main_window import MainWindow
+    from test_modeling import make_workspace
+    from miniscope_gui.core.behavior import Shape
+
+    raw = tmp_path / "raw"
+    make_fake_v4(raw, n_frames=30, size=(64, 64))
+    ws, cfg, _ = make_workspace(tmp_path / "workspace", T=500, N=8)
+    cfg.arena = Shape("rect", [0, 0, 30, 30]).to_dict()
+    cfg.save(ws)
+    w = MainWindow()
+    w.import_page.load_source(str(raw))
+    w.import_page.set_output(str(ws.root))
+    w.steps.setCurrentRow(10)
+    page = w.studies_page
+    page.mode.setCurrentIndex(3)
+    page.run_btn.click()
+    _wait(app, w)
+    assert page.report.isEnabled() and (page.folder / "report.html").is_file()
+    page.mode.setCurrentIndex(2)
+    page.schedule.setPlainText("0,5,5\n25,20,20")
+    page.run_btn.click()
+    _wait(app, w)
+    assert (page.folder / "target_prediction.csv").is_file()
+    w.close()
+    assert page.folder is None and not page.schedule.toPlainText()
+
+
+def test_study_replay_uses_sync_clock(tmp_path, app):
+    from miniscope_gui.gui.main_window import MainWindow
+    from miniscope_gui.core.sync import save_sync
+
+    raw = tmp_path / "raw"
+    make_fake_v4(raw, n_frames=30, size=(64, 64))
+    w = MainWindow()
+    w.import_page.load_source(str(raw))
+    w.import_page.set_output(str(tmp_path / "out"))
+    w.beh_page._open_video(str(raw / "0.avi"))
+    save_sync(w.ws, 2000 + np.arange(30) * 100, "manual", {})
+    folder = w.ws.path("events_test")
+    folder.mkdir()
+    (folder / "events.csv").write_text("pair,state,onset_s,offset_s\n1,pause,2.5,3.1\n")
+    w.ws.record_step("study_freeze", {}, {"folder": folder.name})
+    w.studies_page.update_status()
+    w.studies_page.events.setCurrentIndex(1)
+    w.studies_page.replay.click()
+    assert w.view.slider.value() == 11 and w.view.timer.isActive()
+    w.close()
