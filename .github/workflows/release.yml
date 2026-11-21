@@ -13,6 +13,11 @@ name: Build and release
 on:
   push:
     tags: ["v[0-9]*"]
+  pull_request:
+    paths:
+      - "packaging/**"
+      - "pyproject.toml"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
     inputs:
       version:
@@ -28,7 +33,7 @@ on:
         default: ""
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
@@ -53,6 +58,7 @@ jobs:
         run: |
           want="${INPUT_VERSION#v}"
           have=$(python -c "import miniscope_gui; print(miniscope_gui.__version__)")
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then want="$have"; FORCE=true; fi
           test "$want" = "$have" || { echo "input $want != __version__ $have"; exit 1; }
           patch="${want##*.}"
           min_base=$(tr -d '[:space:]' < packaging/min_base.txt)
@@ -108,7 +114,7 @@ jobs:
 
   macos:
     needs: test
-    if: needs.test.outputs.full == 'true'
+    if: needs.test.outputs.full == 'true' && github.event_name != 'pull_request'
     runs-on: macos-latest   # Apple silicon (arm64)
     steps:
       - uses: actions/checkout@v4
@@ -162,11 +168,13 @@ jobs:
           retention-days: 30
 
   publish:
+    permissions:
+      contents: write
     concurrency:
       group: calcilume-update-channel
       cancel-in-progress: false
     needs: [test, windows, macos]
-    if: always() && needs.test.result == 'success' && (needs.test.outputs.full != 'true' || (needs.windows.result == 'success' && needs.macos.result == 'success'))
+    if: always() && github.event_name != 'pull_request' && needs.test.result == 'success' && (needs.test.outputs.full != 'true' || (needs.windows.result == 'success' && needs.macos.result == 'success'))
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
