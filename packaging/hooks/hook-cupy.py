@@ -6,7 +6,8 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy
 
 
 def runtime_module(name):
-    return not any(part in {"tests", "testing"} for part in name.split("."))
+    # CuPy initializes a lazy loader for cupy.testing even on ordinary imports.
+    return "tests" not in name.split(".")
 
 
 hiddenimports = [
