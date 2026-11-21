@@ -22,6 +22,18 @@ class WorkspaceError(Exception):
     pass
 
 
+def _retry_windows_lock(operation, *args, **kwargs):
+    # Virus scanners and file indexers can briefly deny rename or delete access.
+    for delay in (.025, .05, .1, .2, .4):
+        try:
+            return operation(*args, **kwargs)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) not in (5, 32, 33):
+                raise
+            time.sleep(delay)
+    return operation(*args, **kwargs)
+
+
 @contextmanager
 def _publish_lock(root):
     from PySide6.QtCore import QLockFile
@@ -44,13 +56,13 @@ def _recover_outputs(root):
     if not previous.is_dir() or not created.is_dir():
         raise WorkspaceError(f"无法识别项目恢复目录：{pending}")
     for marker in created.iterdir():
-        (root / marker.name).unlink(missing_ok=True)
+        _retry_windows_lock((root / marker.name).unlink, missing_ok=True)
     for original in previous.iterdir():
-        original.replace(root / original.name)
+        _retry_windows_lock(original.replace, root / original.name)
     # Move the journal aside before cleanup so interruption during cleanup
     # cannot leave a partially removed journal visible on the next open.
     with TemporaryDirectory(dir=root) as directory:
-        pending.rename(Path(directory) / "recovered")
+        _retry_windows_lock(pending.rename, Path(directory) / "recovered")
 
 
 class Workspace:
@@ -113,14 +125,14 @@ class Workspace:
                     if not self.path(source.name).exists():
                         (created / source.name).touch()
                 pending = self.root / PUBLISH_DIR
-                staged.root.rename(pending)
+                _retry_windows_lock(staged.root.rename, pending)
                 try:
                     for source in files:
                         dest = self.path(source.name)
                         if dest.exists():
-                            dest.replace(pending / "previous" / dest.name)
-                        (pending / dest.name).replace(dest)
-                    pending.rename(staged.root)
+                            _retry_windows_lock(dest.replace, pending / "previous" / dest.name)
+                        _retry_windows_lock((pending / dest.name).replace, dest)
+                    _retry_windows_lock(pending.rename, staged.root)
                 except BaseException:
                     _recover_outputs(self.root)
                     raise

@@ -189,18 +189,63 @@ def test_failed_metadata_replace_restores_all_files(tmp_path, monkeypatch):
     ws.path("movie.npy").write_bytes(b"original")
     replace = Path.replace
 
+    attempts = []
     def fail_metadata(path, dest):
         if path == ws.root / PUBLISH_DIR / PROJECT_FILE:
-            raise PermissionError("simulated locked file")
+            attempts.append(path)
+            error = PermissionError("simulated permanent access denial")
+            error.winerror = 5
+            raise error
         return replace(path, dest)
 
+    monkeypatch.setattr("miniscope_gui.core.workspace.time.sleep", lambda _: None)
     monkeypatch.setattr(Path, "replace", fail_metadata)
     with pytest.raises(PermissionError):
         with ws.stage_outputs() as staged:
             staged.path("movie.npy").write_bytes(b"new")
             staged.path("summary.npy").write_bytes(b"new")
             staged.record_step("preprocess", {}, {})
+    assert 1 < len(attempts) < 10
     reopened = Workspace.create_or_open(ws.root)
     assert reopened.step("preprocess") is None
     assert reopened.path("movie.npy").read_bytes() == b"original"
     assert not reopened.path("summary.npy").exists()
+
+
+def test_publication_retries_short_windows_directory_and_file_locks(tmp_path, monkeypatch):
+    from pathlib import Path
+    from miniscope_gui.core.workspace import PUBLISH_DIR
+
+    ws = Workspace.create_or_open(tmp_path / "out")
+    movie = ws.path("movie.npy")
+    movie.write_bytes(b"previous")
+    failures = []
+    rename, replace = Path.rename, Path.replace
+
+    def fail_once(label, code):
+        if label not in failures:
+            failures.append(label)
+            error = PermissionError(label)
+            error.winerror = code
+            raise error
+
+    def rename_directory(path, dest):
+        if dest == ws.path(PUBLISH_DIR):
+            fail_once("new journal", 5)
+        return rename(path, dest)
+
+    def replace_file(path, dest):
+        if path == movie:
+            fail_once("existing movie", 32)
+        return replace(path, dest)
+
+    monkeypatch.setattr(Path, "rename", rename_directory)
+    monkeypatch.setattr(Path, "replace", replace_file)
+    with ws.stage_outputs() as staged:
+        staged.path(movie.name).write_bytes(b"complete")
+        staged.record_step("preprocess", {}, {})
+    assert failures == ["new journal", "existing movie"]
+    reopened = Workspace.create_or_open(ws.root)
+    assert reopened.step("preprocess") == ws.step("preprocess")
+    assert movie.read_bytes() == b"complete"
+    assert not ws.path(PUBLISH_DIR).exists()
