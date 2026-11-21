@@ -14,6 +14,7 @@ class ArrayBackend:
 
     xp = np
     is_gpu = True
+    kind = "cuda"
     name = "test device"
     reason = ""
     asnumpy = staticmethod(np.asarray)
@@ -40,7 +41,7 @@ def test_cuda_recovers_weak_frequency_phase_in_smooth_movie(tmp_path):
     from miniscope_gui.core.gpu import open_backend
 
     backend = open_backend("gpu")
-    if not backend.is_gpu:
+    if backend.kind != "cuda":
         pytest.skip(backend.reason)
     base = cv2.GaussianBlur(np.random.default_rng(51).normal(60, 32, (256, 256)).astype(np.float32),
                             (0, 0), 2)
@@ -60,7 +61,7 @@ def test_cuda_motion_outputs_on_hardware(tmp_path, piecewise):
     from miniscope_gui.core.gpu import open_backend
 
     device = open_backend("gpu")
-    if not device.is_gpu:
+    if device.kind != "cuda":
         pytest.skip(f"CUDA unavailable: {device.reason}")
     T = 21
     shifts = np.sin(np.arange(T)[:, None] * np.array([[.4, .6]])) * 3

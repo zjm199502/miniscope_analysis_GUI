@@ -42,6 +42,8 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+本地开发版的运动校正、去背景及细胞提取支持 Apple Metal 和 NVIDIA CUDA。Apple M 系列 Mac 可从源码目录运行 `bash packaging/test_macos_metal.sh` 做真机对照测试。[安装与设备选择说明](docs/教程.md#视频处理与细胞提取的-gpu-计算设备)
+
 Windows 上也可以直接双击 `packaging\install_and_run.bat`（第一次会自动安装）。
 打包成独立的 exe：在仓库根目录运行 `packaging\build_windows.bat`。
 

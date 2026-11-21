@@ -95,7 +95,7 @@ class BackgroundPage(ComputePage):
         return run_background
 
 
-class ExtractionPage(StepPage):
+class ExtractionPage(ComputePage):
     step_key = "extraction"
     title = "5. 细胞提取"
     intro = ("先计算每个像素和周围像素的相关性（相关图）以及信号强度（PNR），"
@@ -104,6 +104,7 @@ class ExtractionPage(StepPage):
     results = (("cells", "检查细胞"), ("cn", "相关图"), ("pnr", "PNR 图"), ("bg_max", "最大投影"))
 
     def build_params(self):
+        super().build_params()
         self.diam = self.add_param("细胞直径", self.spin(3, 60, 8, suffix=" 像素"),
                                    "和上一步保持一致。")
         self.min_corr = self.add_param("最小相关", self.dspin(0.3, 0.99, 0.8, 0.05),
@@ -160,12 +161,14 @@ class ExtractionPage(StepPage):
 
     def params(self):
         return ExtractionParams(cell_diameter=self.diam.value(), min_corr=self.min_corr.value(),
-                                min_pnr=self.min_pnr.value(), merge_threshold=self.merge.value())
+                                min_pnr=self.min_pnr.value(), merge_threshold=self.merge.value(),
+                                **self.compute_params())
 
     def run_function(self):
         return run_extraction
 
     def on_context(self):
+        super().on_context()
         st = self.ws.step("background") if self.ws else None
         if st:
             self.diam.setValue(int(st["params"].get("cell_diameter", 10)))

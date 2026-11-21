@@ -70,7 +70,10 @@ def run_background(session, ws: Workspace, p: BackgroundParams,
         with backend.activate():
             return _filter_movie(ws, movie, p, backend, reason, progress, should_stop)
     except Exception as exc:
-        if not backend.is_gpu or not is_gpu_error(exc):
+        if backend.is_gpu:
+            from traceback import clear_frames
+            clear_frames(exc.__traceback__)
+        if not backend.is_gpu or not is_gpu_error(exc, backend):
             raise
         reason = f"GPU 去背景失败：{exc}"
     finally:
@@ -86,11 +89,14 @@ def _filter_movie(ws, movie, p, backend, reason, progress, should_stop):
     kernel = disk(max(1, int(p.cell_diameter)))
     gpu_filter = None
     if backend.is_gpu:
-        from .background_cuda import BackgroundFilter
+        if backend.kind == "metal":
+            from .background_metal import BackgroundFilter
+        else:
+            from .background_cuda import BackgroundFilter
         gpu_filter = BackgroundFilter(backend, p.median_ksize, kernel)
     # Three FP32 device buffers and host transfers; keep each batch bounded.
     batch_size = max(1, min(32, (32 * 1024**2) // (H * W * 4)))
-    outputs = dict(movie=BG_FILE, compute_backend="cuda" if backend.is_gpu else "cpu",
+    outputs = dict(movie=BG_FILE, compute_backend=backend.kind,
                    compute_device=backend.name, fallback_reason=reason)
     max_img = np.zeros((H, W), np.float32)
     sum_img = np.zeros((H, W), np.float64)
@@ -115,6 +121,7 @@ def _filter_movie(ws, movie, p, backend, reason, progress, should_stop):
                 progress(end / T, f"{backend.name} 去除背景 {end}/{T} 帧")
             if should_stop():
                 raise InterruptedError("已取消")
+            backend.synchronize()
         np.save(staged.path("bg_max.npy"), max_img)
         np.save(staged.path("bg_mean.npy"), (sum_img / T).astype(np.float32))
         staged.record_step("background", asdict(p), outputs)

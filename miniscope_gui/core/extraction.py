@@ -51,6 +51,8 @@ class ExtractionParams:
     candidate_relax: float = 0.75  # relaxed thresholds for those: min_corr and min_pnr x this
     min_area_fraction: float = 0.15   # of a disk with the cell diameter
     chunk_frames: int = 200
+    backend: str = "auto"
+    device_id: int | None = None
 
 
 # --------------------------------------------------------------- utilities
@@ -92,7 +94,7 @@ def _neighbour_slices(H, W, dy, dx):
 
 
 def summary_images(movie, sigma: float, chunk: int, progress, should_stop, mask=None,
-                   noise_thr: float = 3.0):
+                   noise_thr: float = 3.0, backend=None):
     """Local correlation image and PNR image, as in CNMF-E.
 
     Pass 1: per-pixel mean, max and noise of the smoothed movie (PNR).
@@ -123,16 +125,26 @@ def summary_images(movie, sigma: float, chunk: int, progress, should_stop, mask=
     thr = mean + noise_thr * noise
     t1 = np.zeros((H, W)); t2 = np.zeros((H, W))
     cross = np.zeros((len(_OFFSETS), H, W))
+    statistics = None
+    if backend is not None and backend.is_gpu:
+        from .extraction_gpu import SummaryProducts
+        statistics = SummaryProducts(backend)
     sl = [_neighbour_slices(H, W, dy, dx) for dy, dx in _OFFSETS]
     for a, b in _chunks(T, chunk):
         if should_stop():
             raise InterruptedError("已取消")
         Yf = _smooth(np.asarray(movie[a:b], np.float32), sigma) - mean
         Yf[Yf < (thr - mean)] = 0.0
-        t1 += Yf.sum(0, dtype=np.float64)
-        t2 += (Yf * Yf).sum(0, dtype=np.float64)
-        for i, ((ya, xa), (yb, xb)) in enumerate(sl):
-            cross[i][ya, xa] += (Yf[:, ya, xa] * Yf[:, yb, xb]).sum(0, dtype=np.float64)
+        if statistics is None:
+            t1 += Yf.sum(0, dtype=np.float64)
+            t2 += (Yf * Yf).sum(0, dtype=np.float64)
+            for i, ((ya, xa), (yb, xb)) in enumerate(sl):
+                cross[i][ya, xa] += (Yf[:, ya, xa] * Yf[:, yb, xb]).sum(0, dtype=np.float64)
+        else:
+            total, energy, neighbours = statistics.statistics(Yf)
+            t1 += total
+            t2 += energy
+            cross += neighbours
         progress(0.12 + b / T * 0.13, f"计算相关图 {b}/{T}")
     m = t1 / T
     sd = np.sqrt(np.maximum(t2 / T - m * m, 0))
@@ -249,7 +261,7 @@ class _Residual:
         return blk.reshape(T_, H, W)
 
 
-def _init_cells(Y, seeds, H, W, R, chunk, progress, should_stop, f0, df, max_r=None):
+def _init_cells(Y, seeds, H, W, R, chunk, progress, should_stop, f0, df, max_r=None, backend=None):
     """Initial footprints: correlation of each patch pixel with the seed's trace."""
     T = Y.shape[0]
     npix = H * W
@@ -259,6 +271,7 @@ def _init_cells(Y, seeds, H, W, R, chunk, progress, should_stop, f0, df, max_r=N
     ys, xs = seeds[:, 0], seeds[:, 1]
     pix_s1 = np.zeros(npix); pix_s2 = np.zeros(npix)
     yc = [np.zeros(len(ix)) for ix in patches.idx]
+    products = _spatial_products(backend, patches)
     for a, b in _chunks(T, chunk):
         if should_stop():
             raise InterruptedError("已取消")
@@ -267,8 +280,12 @@ def _init_cells(Y, seeds, H, W, R, chunk, progress, should_stop, f0, df, max_r=N
         C[:, a:b] = Ys[:, ys, xs].T
         flat = blk.reshape(b - a, -1).astype(np.float64)
         pix_s1 += flat.sum(0); pix_s2 += (flat ** 2).sum(0)
-        for k in range(K):
-            yc[k] += patches.take(k, blk).T.astype(np.float64) @ C[k, a:b].astype(np.float64)
+        if products is None:
+            for k in range(K):
+                yc[k] += patches.take(k, blk).T.astype(np.float64) @ C[k, a:b].astype(np.float64)
+        else:
+            for total, part in zip(yc, products.products(blk, C[:, a:b]), strict=True):
+                total += part
         progress(f0 + df * b / T, f"初始化细胞形状 {b}/{T}")
     ybar = pix_s1 / T
     ystd = np.sqrt(np.maximum(pix_s2 / T - ybar ** 2, 1e-12))
@@ -307,10 +324,10 @@ def _distinct_new(A, C, n_old, H, W, diameter, max_corr=None):
     return keep
 
 
-def _refine(Y, A, C, b0, ybar, patches, seeds, chunk, p, H, W, progress, should_stop, f0, df, label):
-    C, b0 = _update_C(Y, A, C, b0, ybar, chunk, progress, should_stop, f0, df / 2, f"{label} 更新活动")
+def _refine(Y, A, C, b0, ybar, patches, seeds, chunk, p, H, W, progress, should_stop, f0, df, label, backend):
+    C, b0 = _update_C(Y, A, C, b0, ybar, chunk, progress, should_stop, f0, df / 2, f"{label} 更新活动", backend)
     A, patches, C, seeds = _update_A(Y, A, C, b0, patches, seeds, chunk, p, progress, should_stop,
-                                     f0 + df / 2, df / 2, f"{label} 更新形状")
+                                     f0 + df / 2, df / 2, f"{label} 更新形状", backend)
     A, C, seeds, patches = _merge(A, C, seeds, patches, p, H, W)
     b0 = (ybar - A @ C.mean(1)).astype(np.float32)
     return A, C, b0, seeds, patches
@@ -327,30 +344,73 @@ def run_extraction(session, ws: Workspace, p: ExtractionParams,
     from .cleanup import require_file
     require_file(ws, "movie_bg.npy", "4. 去除背景")
     Y = load_bg_movie(ws)
-    T, H, W = Y.shape
-    npix = H * W
+    _, H, W = Y.shape
     mask = np.load(ws.path("fov_mask.npy")) if ws.path("fov_mask.npy").exists() else None
     if mask is not None and mask.shape != (H, W):
         mask = None
     sigma = max(0.5, p.cell_diameter / 6.0)
     chunk = max(50, int(p.chunk_frames))
 
-    # 1. summary images
-    cn, pnr, _, _ = summary_images(Y, sigma, chunk, progress, should_stop, mask)
-    np.save(ws.path(CN_FILE), cn)
-    np.save(ws.path(PNR_FILE), pnr)
+    from .gpu import is_gpu_error, open_backend
 
-    # 2. seeds
-    seeds = find_seeds(cn, pnr, p, mask)
-    K = len(seeds)
-    progress(0.27, f"找到 {K} 个候选细胞")
-    if K == 0:
-        raise ValueError("没有找到符合条件的细胞。可以降低「最小相关」或「最小 PNR」再试。")
+    no_seeds = "没有找到符合条件的细胞。可以降低「最小相关」或「最小 PNR」再试。"
+    backend = open_backend(p.backend, p.device_id)
+    reason = backend.reason if not backend.is_gpu and p.backend != "cpu" else ""
+    with ws.stage_outputs() as staged:
+        def fit(device):
+            with device.activate():
+                cn, pnr, _, _ = summary_images(Y, sigma, chunk, progress, should_stop,
+                                               mask, backend=device)
+                seeds = find_seeds(cn, pnr, p, mask)
+                progress(0.27, f"找到 {len(seeds)} 个候选细胞")
+                # The first pair of maps is useful for adjusting thresholds even
+                # when no seeds qualify. A failed rerun preserves the previous fit.
+                np.save(staged.path(CN_FILE), cn)
+                np.save(staged.path(PNR_FILE), pnr)
+                if not len(seeds):
+                    return None
+                return _fit_cells(ws, staged, Y, cn, pnr, seeds, p, mask, sigma,
+                                  chunk, device, progress, should_stop)
 
+        retry_cpu = False
+        try:
+            counts = fit(backend)
+        except Exception as exc:
+            if backend.is_gpu:
+                from traceback import clear_frames
+                clear_frames(exc.__traceback__)
+            if not backend.is_gpu or not is_gpu_error(exc, backend):
+                raise
+            reason = f"GPU 细胞提取失败：{exc}"
+            retry_cpu = True
+        finally:
+            backend.release()
+        if retry_cpu:
+            if should_stop():
+                raise InterruptedError("已取消")
+            progress(0.0, reason + "。使用 CPU 从头重新提取…")
+            backend = open_backend("cpu")
+            counts = fit(backend)
+        if should_stop():
+            raise InterruptedError("已取消")
+        if counts is not None:
+            outputs = dict(cells=CELLS_FILE, **counts, compute_backend=backend.kind,
+                           compute_device=backend.name, fallback_reason=reason)
+            staged.record_step("extraction", asdict(p), outputs)
+        elif ws.path(CELLS_FILE).exists():
+            raise ValueError(no_seeds)
+    if counts is None:
+        raise ValueError(no_seeds)
+    progress(1.0, f"细胞提取完成，共 {counts['n_cells']} 个候选，其中 {counts['n_low_quality']} 个低置信")
+    return outputs
+
+
+def _fit_cells(ws, staged, Y, cn, pnr, seeds, p, mask, sigma, chunk, backend, progress, should_stop):
+    _, H, W = Y.shape
     # 3. init
     R = int(np.ceil(1.5 * p.cell_diameter))   # patch half-width: room for the whole cell
     seeds, A, C, ybar = _init_cells(Y, seeds, H, W, R, chunk, progress, should_stop, 0.27, 0.10,
-                                    max_r=FOOTPRINT_R * p.cell_diameter)
+                                    max_r=FOOTPRINT_R * p.cell_diameter, backend=backend)
     patches = _Patches(seeds, H, W, R)
     b0 = ybar.astype(np.float32)  # offset, refined below
 
@@ -359,7 +419,7 @@ def run_extraction(session, ws: Workspace, p: ExtractionParams,
     for it in range(n_it):
         A, C, b0, seeds, patches = _refine(Y, A, C, b0, ybar, patches, seeds, chunk, p, H, W,
                                            progress, should_stop, 0.37 + 0.30 * it / n_it,
-                                           0.30 / n_it, f"第 {it + 1} 轮")
+                                           0.30 / n_it, f"第 {it + 1} 轮", backend)
 
     # 4b. look again in what the cells found so far do not explain: dim cells
     #     next to bright ones are hidden in the first summary images
@@ -367,7 +427,7 @@ def run_extraction(session, ws: Workspace, p: ExtractionParams,
         res = _Residual(Y, A, C, b0)
         cn2, pnr2, _, _ = summary_images(res, sigma, chunk,
                                          lambda f, m: progress(0.67 + 0.08 * f / 0.25, "在残差中寻找遗漏的细胞"),
-                                         should_stop, mask)
+                                         should_stop, mask, backend=backend)
         new = find_seeds(cn2, pnr2, p, mask)
         if len(new):
             cen = _centroids(A, H, W)
@@ -376,21 +436,21 @@ def run_extraction(session, ws: Workspace, p: ExtractionParams,
         if len(new):
             new, A2, C2, _ = _init_cells(res, new, H, W, R, chunk,
                                          lambda f, m: progress(f, "初始化新增的细胞"), should_stop, 0.75, 0.04,
-                                         max_r=FOOTPRINT_R * p.cell_diameter)
+                                         max_r=FOOTPRINT_R * p.cell_diameter, backend=backend)
             if len(new):
                 n_old = A.shape[1]
                 A = sp.hstack([A, A2]).tocsc().astype(np.float32)
                 C = np.vstack([C, C2]).astype(np.float32)
                 seeds = np.vstack([seeds, new])
                 patches = _Patches(seeds, H, W, R)
-                C, b0 = _update_C(Y, A, C, b0, ybar, chunk, progress, should_stop, 0.79, 0.03, "补充细胞后 更新活动")
+                C, b0 = _update_C(Y, A, C, b0, ybar, chunk, progress, should_stop, 0.79, 0.03, "补充细胞后 更新活动", backend)
                 # a new cell must not just be a leftover of an old neighbour
                 keep = _distinct_new(A, C, n_old, H, W, p.cell_diameter)
                 A, C, seeds = A[:, keep], C[keep], seeds[keep]
                 patches = _Patches(seeds, H, W, R)
                 new = new[: int(keep.sum()) - n_old]
                 A, C, b0, seeds, patches = _refine(Y, A, C, b0, ybar, patches, seeds, chunk, p, H, W,
-                                                   progress, should_stop, 0.82, 0.04, "补充细胞后")
+                                                   progress, should_stop, 0.82, 0.04, "补充细胞后", backend)
         progress(0.86, f"残差中新增 {len(new)} 个候选细胞")
 
     # 4c. high-recall pass: with the model fixed, collect every remaining spot in the
@@ -402,12 +462,12 @@ def run_extraction(session, ws: Workspace, p: ExtractionParams,
     cn_res = pnr_res = None
     if p.extra_candidates and len(C):
         A, C, b0, seeds, n_extra, cn_res, pnr_res = _candidate_pass(Y, A, C, b0, ybar, seeds, p, H, W, R, sigma,
-                                                    chunk, mask, progress, should_stop)
+                                                    chunk, mask, progress, should_stop, backend)
         source = np.concatenate([source, np.full(n_extra, 2, np.int8)])
         progress(0.88, f"补充 {n_extra} 个低置信候选")
 
     # 5. final traces + raw traces + local fluorescence for dF/F
-    C, b0, raw, F_local = _final_traces(ws, Y, A, C, b0, ybar, chunk, progress, should_stop)
+    C, b0, raw, F_local = _final_traces(ws, Y, A, C, b0, ybar, chunk, progress, should_stop, backend)
 
     # quality metrics
     area = np.asarray((A > 0).sum(0)).ravel()
@@ -434,22 +494,19 @@ def run_extraction(session, ws: Workspace, p: ExtractionParams,
                                  p.cell_diameter, (H, W))
     quality = quality_score(feats, snr, area, source, p.cell_diameter)
 
-    save_cells(ws, A=A, C=C, raw=raw, F_local=F_local, centres=centres, snr=snr,
+    save_cells(staged, A=A, C=C, raw=raw, F_local=F_local, centres=centres, snr=snr,
                area=area, accepted=np.ones(len(C), bool), shape=(H, W), source=source,
                quality=quality, **{f"q_{k}": v for k, v in feats.items()})
     n_low = int((quality < LOW_QUALITY).sum())
-    ws.record_step("extraction", asdict(p), {"cells": CELLS_FILE, "n_cells": int(len(C)),
-                                             "n_low_quality": n_low})
-    progress(1.0, f"细胞提取完成，共 {len(C)} 个候选，其中 {n_low} 个低置信")
     return {"n_cells": int(len(C)), "n_low_quality": n_low}
 
 
-def _candidate_pass(Y, A, C, b0, ybar, seeds, p, H, W, R, sigma, chunk, mask, progress, should_stop):
+def _candidate_pass(Y, A, C, b0, ybar, seeds, p, H, W, R, sigma, chunk, mask, progress, should_stop, backend):
     """Add low-confidence candidates from the residual, without changing existing cells."""
     res = _Residual(Y, A, C, b0)
     cn, pnr, _, _ = summary_images(res, sigma, chunk,
                                    lambda f, m: progress(0.86 + 0.01 * f / 0.25, "寻找低置信候选"),
-                                   should_stop, mask)
+                                   should_stop, mask, backend=backend)
     q = ExtractionParams(**{**asdict(p), "min_corr": p.min_corr * p.candidate_relax,
                             "min_pnr": p.min_pnr * p.candidate_relax})
     new = find_seeds(cn, pnr, q, mask)
@@ -461,12 +518,12 @@ def _candidate_pass(Y, A, C, b0, ybar, seeds, p, H, W, R, sigma, chunk, mask, pr
         return A, C, b0, seeds, 0, cn, pnr
     new, A2, C2, _ = _init_cells(res, new, H, W, R, chunk,
                                  lambda f, m: progress(0.87, "初始化低置信候选"), should_stop, 0.87, 0.0,
-                                 max_r=FOOTPRINT_R * p.cell_diameter)
+                                 max_r=FOOTPRINT_R * p.cell_diameter, backend=backend)
     if not len(new):
         return A, C, b0, seeds, 0, cn, pnr
     # traces of the new candidates only, fitted to the residual
     zero = np.zeros(H * W, np.float32)
-    C2, _ = _update_C(res, A2, C2, zero, zero, chunk, lambda f, m: None, should_stop, 0, 0, "")
+    C2, _ = _update_C(res, A2, C2, zero, zero, chunk, lambda f, m: None, should_stop, 0, 0, "", backend)
     ok = C2.max(1) > 0
     A2, C2, new = A2[:, ok], C2[ok], new[ok]
     A = sp.hstack([A, A2]).tocsc().astype(np.float32)
@@ -557,32 +614,52 @@ def _hals_C(YA, AtA, Cc, n_inner=5):
     return Cc
 
 
-def _update_C(Y, A, C, b0, ybar, chunk, progress, should_stop, f0, df, label):
+def _spatial_products(backend, patches):
+    if backend is not None and backend.is_gpu:
+        from .extraction_gpu import SpatialProducts
+        return SpatialProducts(backend, patches.idx)
+    return None
+
+
+def _temporal_solve(AtA, backend):
+    if backend.is_gpu:
+        from .extraction_gpu import TemporalUpdate
+        return TemporalUpdate(backend, AtA).solve
+    return lambda projection, previous: _hals_C(projection, AtA, previous.copy())
+
+
+def _update_C(Y, A, C, b0, ybar, chunk, progress, should_stop, f0, df, label, backend):
     T = Y.shape[0]
     At = A.T.tocsr()
     AtA = (At @ A).toarray()
+    solve = _temporal_solve(AtA, backend)
     Atb = At @ b0
     for a, b in _chunks(T, chunk):
         if should_stop():
             raise InterruptedError("已取消")
         flat = np.asarray(Y[a:b]).reshape(b - a, -1).astype(np.float32)
         YA = (At @ flat.T) - Atb[:, None]
-        C[:, a:b] = _hals_C(YA, AtA, C[:, a:b].copy())
+        C[:, a:b] = solve(YA, C[:, a:b])
         progress(f0 + df * b / T, f"{label} {b}/{T}")
     b0 = (ybar - A @ C.mean(1)).astype(np.float32)
     return C, b0
 
 
-def _update_A(Y, A, C, b0, patches, seeds, chunk, p, progress, should_stop, f0, df, label):
+def _update_A(Y, A, C, b0, patches, seeds, chunk, p, progress, should_stop, f0, df, label, backend):
     T, H, W = Y.shape
     K = C.shape[0]
     yc = [np.zeros(len(ix)) for ix in patches.idx]
+    products = _spatial_products(backend, patches)
     for a, b in _chunks(T, chunk):
         if should_stop():
             raise InterruptedError("已取消")
         blk = np.asarray(Y[a:b]).astype(np.float32)
-        for k in range(K):
-            yc[k] += patches.take(k, blk).T @ C[k, a:b]
+        if products is None:
+            for k in range(K):
+                yc[k] += patches.take(k, blk).T @ C[k, a:b]
+        else:
+            for total, part in zip(yc, products.products(blk, C[:, a:b]), strict=True):
+                total += part
         progress(f0 + df * b / T, f"{label} {b}/{T}")
     CCt = C.astype(np.float64) @ C.T.astype(np.float64)
     csum = C.sum(1).astype(np.float64)
@@ -652,12 +729,13 @@ def _merge(A, C, seeds, patches, p, H, W):
     return A, np.stack(newC).astype(np.float32), seeds, _Patches(seeds, H, W, patches.R)
 
 
-def _final_traces(ws, Y, A, C, b0, ybar, chunk, progress, should_stop):
+def _final_traces(ws, Y, A, C, b0, ybar, chunk, progress, should_stop, backend):
     from .background import source_movie
     T = Y.shape[0]
     F = source_movie(ws, "motion")   # motion-corrected movie (before background removal)
     At = A.T.tocsr()
     AtA = (At @ A).toarray()
+    solve = _temporal_solve(AtA, backend)
     Atb = At @ b0
     diag = np.maximum(np.diag(AtA), 1e-12)
     wsum = np.asarray(A.sum(0)).ravel()
@@ -669,7 +747,7 @@ def _final_traces(ws, Y, A, C, b0, ybar, chunk, progress, should_stop):
             raise InterruptedError("已取消")
         flat = np.asarray(Y[a:b]).reshape(b - a, -1).astype(np.float32)
         YA = (At @ flat.T) - Atb[:, None]
-        Cc = _hals_C(YA, AtA, C[:, a:b].copy())
+        Cc = solve(YA, C[:, a:b])
         C[:, a:b] = Cc
         raw[:, a:b] = Cc + (YA - AtA @ Cc) / diag[:, None]
         fflat = np.asarray(F[a:b]).reshape(b - a, -1).astype(np.float32)

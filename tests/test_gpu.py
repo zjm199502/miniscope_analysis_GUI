@@ -10,6 +10,7 @@ from miniscope_gui.core import gpu
 @pytest.fixture(autouse=True)
 def reset_cache(monkeypatch):
     monkeypatch.setattr(gpu, "_cache", None)
+    monkeypatch.setattr(gpu, "_apple_silicon", lambda: False)
 
 
 def test_cpu_does_not_probe_and_hybrid_inventory_survives_missing_cupy(monkeypatch):
@@ -132,3 +133,96 @@ def test_gpu_failure_type_distinguishes_data_errors():
         MemoryError()
     )
     assert not gpu.is_gpu_error(ValueError("wrong shape"))
+
+
+def test_metal_detection_fft_selection_and_task_lifetime(monkeypatch):
+    events = []
+
+    @contextmanager
+    def stream(device):
+        assert device == "gpu"
+        events.append("enter")
+        try:
+            yield
+        finally:
+            events.append("exit")
+
+    def rfft2(x):
+        assert events[-1] == "enter"
+        events.append("fft")
+        return np.fft.rfft2(x)
+
+    mx = SimpleNamespace(
+        gpu="gpu",
+        stream=stream,
+        array=np.asarray,
+        metal=SimpleNamespace(is_available=lambda: True),
+        device_info=lambda d: {"device_name": "Apple M4", "memory_size": 16000},
+        synchronize=lambda d: events.append("sync"),
+        eval=lambda x: events.append("eval"),
+        clear_cache=lambda: events.append("clear"),
+        fft=SimpleNamespace(rfft2=rfft2, irfft2=np.fft.irfft2),
+    )
+    monkeypatch.setattr(gpu, "_apple_silicon", lambda: True)
+    monkeypatch.setattr(gpu, "_system_adapters", lambda: ["Apple M4"])
+    monkeypatch.setattr(
+        gpu, "_load_cupy", lambda: pytest.fail("CUDA import on Apple Silicon")
+    )
+    monkeypatch.setattr(gpu, "_load_mlx", lambda: mx)
+    inventory = gpu.detect_gpus()
+    assert events == ["enter", "fft", "eval", "sync", "exit", "clear"]
+    assert inventory["cuda_devices"] == []
+    assert inventory["devices"] == inventory["metal_devices"]
+    assert inventory["adapters"] == ["Apple M4"]
+    assert inventory["devices"][0]["free_bytes"] is None
+    backend = gpu.open_backend("metal", 0)
+    assert backend.kind == "metal" and backend.xp is mx
+    assert (
+        gpu.open_backend().kind == "metal" and gpu.open_backend("gpu").kind == "metal"
+    )
+    assert gpu.open_backend("cuda").kind == gpu.open_backend("metal", 1).kind == "cpu"
+    events.clear()
+    with pytest.raises(RuntimeError, match="command buffer"):
+        with backend.activate():
+            with backend.activate():
+                pass
+            assert "clear" not in events
+            raise RuntimeError("[METAL] command buffer failed")
+    assert events.count("clear") == 1
+    backend.release()  # after the exception traceback is no longer holding arrays
+    backend.release()
+    assert events.count("clear") == 2
+    with backend.activate():
+        pass
+    assert events.count("clear") == 3
+    backend.release()
+    assert events.count("clear") == 3
+    assert gpu.is_gpu_error(RuntimeError("[METAL] command buffer failed"))
+    assert gpu.is_gpu_error(RuntimeError("kernel compilation failed"), backend)
+    assert not gpu.is_gpu_error(RuntimeError("project save failed"), backend)
+    from miniscope_gui.core.workspace import WorkspaceError
+
+    assert not gpu.is_gpu_error(WorkspaceError("lock timeout"), backend)
+    assert not gpu.is_gpu_error(InterruptedError("cancelled"), backend)
+    assert not gpu.is_gpu_error(ValueError("bad shape"), backend)
+    mx.fft.irfft2 = lambda freq, s: np.zeros(s)
+    assert "FFT 自检结果不符" in gpu.detect_gpus(refresh=True)["detail"]
+    assert gpu.open_backend().kind == "cpu"
+
+
+def test_metal_missing_and_no_device(monkeypatch):
+    monkeypatch.setattr(gpu, "_apple_silicon", lambda: True)
+    monkeypatch.setattr(gpu, "_system_adapters", lambda: ["Apple M2"])
+
+    def missing():
+        raise ModuleNotFoundError("mlx.core", name="mlx")
+
+    monkeypatch.setattr(gpu, "_load_mlx", missing)
+    assert gpu.detect_gpus()["adapters"] == ["Apple M2"]
+    assert "未安装 MLX" in gpu.open_backend().reason
+    monkeypatch.setattr(
+        gpu,
+        "_load_mlx",
+        lambda: SimpleNamespace(metal=SimpleNamespace(is_available=lambda: False)),
+    )
+    assert "未提供 Metal" in gpu.detect_gpus(refresh=True)["detail"]

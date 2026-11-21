@@ -76,7 +76,8 @@ class MainWindow(QMainWindow):
         self.bg_page = BackgroundPage()
         self.ext_page = ExtractionPage()
         self.sig_page = SignalsPage()
-        self.step_pages = [self.motion_page, self.bg_page, self.ext_page, self.sig_page]
+        self.compute_pages = (self.motion_page, self.bg_page, self.ext_page)
+        self.step_pages = [*self.compute_pages, self.sig_page]
         self.pages = QStackedWidget()
         for w in [self.import_page, self.pre_page, *self.step_pages]:
             self.pages.addWidget(w)
@@ -193,7 +194,7 @@ class MainWindow(QMainWindow):
         page = self.pages.widget(row)
         self._joint = None
         self._clear_model_view()
-        if page in (self.motion_page, self.bg_page) and self.ws:
+        if page in self.compute_pages and self.ws:
             self._identify_devices(page)
         if page is self.model_page:
             self.model_page.on_context()
@@ -213,8 +214,8 @@ class MainWindow(QMainWindow):
         # Device discovery belongs to the window, not to a project or its analysis queue.
         if page.has_inventory() or self._probe_thread is not None or self._closing:
             return
-        for target in (self.motion_page, self.bg_page):
-            target.device_info.setText("正在识别系统显卡并检查 CUDA…")
+        for target in self.compute_pages:
+            target.device_info.setText("正在识别系统显卡并验证 GPU 运算…")
             target.device_info.show()
         self._probe_thread, self._probe_worker = start_worker(
             self, probe_devices, None, None, {"refresh": False})
@@ -225,12 +226,12 @@ class MainWindow(QMainWindow):
 
     def _show_device_report(self, result):
         if not self._closing and result.inventory:
-            self.motion_page.show_devices(result.inventory)
-            self.bg_page.show_devices(result.inventory)
+            for page in self.compute_pages:
+                page.show_devices(result.inventory)
 
     def _probe_failed(self, msg):
         if not self._closing:
-            for page in (self.motion_page, self.bg_page):
+            for page in self.compute_pages:
                 page.device_info.setText(f"设备识别失败：{msg}")
 
     def _finish_probe(self):

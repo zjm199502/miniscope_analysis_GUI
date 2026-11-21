@@ -184,6 +184,55 @@ class _CudaRegistrar(_Registrar):
         return shifts
 
 
+class _MetalRegistrar(_Registrar):
+    """Use Metal for batched phase normalization and inverse FFT.
+
+    The forward FFT uses the same host implementation as the CPU registrar.
+    On very smooth frames the phase of weak coefficients is sensitive to
+    single-precision forward FFT roundoff; Apple GPUs lack native FP64 FFTs.
+    Once normalized, the inverse transform has bounded inputs.
+    """
+
+    def __init__(self, shape, p, backend):
+        super().__init__(shape, p)
+        self.backend = backend
+
+    @staticmethod
+    def batch_size(shape):
+        return max(1, min(32, (64 * 1024**2) // (int(np.prod(shape)) * 72)))
+
+    def _correlate(self, references, images, window, limit):
+        mx = self.backend.xp
+        spectra = self._fft(images, window)
+        cross = references * mx.conj(mx.array(spectra.astype(np.complex64, copy=False)))
+        normalized = cross / (mx.abs(cross) + 1e-9)
+        h, w = images.shape[-2:]
+        corr = mx.fft.irfft2(normalized, s=(h, w), axes=(-2, -1))
+        m = min(limit, h // 2 - 1, w // 2 - 1)
+        axis = np.arange(-m, m + 1, dtype=np.int32)
+        sub = mx.take(mx.take(corr, mx.array(axis % h), axis=1), mx.array(axis % w), axis=2)
+        return [_peak_shift(peak, m) for peak in self.backend.asnumpy(sub)]
+
+    def _references(self, images, window):
+        return self.backend.xp.array(self._fft(images, window).astype(np.complex64, copy=False))
+
+    def shifts(self, template, images):
+        if self._template is not template:
+            self._template = template
+            self._tpl_fft = self._references(template, self.window)
+        return self._correlate(self._tpl_fft, images, self.window, self.p.max_shift)
+
+    def patch_shifts(self, template, image, origins, size, window, limit):
+        batch = self.batch_size((size, size))
+        shifts = []
+        for start in range(0, len(origins), batch):
+            chunk = origins[start:start+batch]
+            refs = np.stack([template[y:y+size, x:x+size] for y, x in chunk])
+            imgs = np.stack([image[y:y+size, x:x+size] for y, x in chunk])
+            shifts.extend(self._correlate(self._references(refs, window), imgs, window, limit))
+        return shifts
+
+
 def apply_shift(frame: np.ndarray, dx: float, dy: float) -> np.ndarray:
     M = np.float32([[1, 0, dx], [0, 1, dy]])
     h, w = frame.shape
@@ -279,7 +328,7 @@ def run_motion_correction(session, ws: Workspace, p: MotionParams,
             # batches after cancellation, even after the worker has stopped.
             from traceback import clear_frames
             clear_frames(exc.__traceback__)
-        if not backend.is_gpu or not is_gpu_error(exc):
+        if not backend.is_gpu or not is_gpu_error(exc, backend):
             raise
         reason = f"GPU 运行失败：{exc}"
     finally:
@@ -307,7 +356,12 @@ def _registered_frames(movie, p, reg, template, should_stop):
 
 def _correct_movie(ws, movie, p, backend, reason, progress, should_stop):
     T, H, W = movie.shape
-    reg = _CudaRegistrar((H, W), p, backend) if backend.is_gpu else _Registrar((H, W), p)
+    if backend.kind == "metal":
+        reg = _MetalRegistrar((H, W), p, backend)
+    elif backend.kind == "cuda":
+        reg = _CudaRegistrar((H, W), p, backend)
+    else:
+        reg = _Registrar((H, W), p)
     progress(0.0, f"生成参考模板（{backend.name}）…")
     template = build_template(movie, p, reg, should_stop)
 
@@ -351,7 +405,7 @@ def _correct_movie(ws, movie, p, backend, reason, progress, should_stop):
         np.save(staged.path("mc_mean.npy"), (sum_img / T).astype(np.float32))
         np.save(staged.path("mc_max.npy"), max_img)
         summary = {
-            "compute_backend": "cuda" if backend.is_gpu else "cpu",
+            "compute_backend": backend.kind,
             "compute_device": backend.name,
             "fallback_reason": reason,
             "max_abs_shift": float(np.abs(shifts).max()),

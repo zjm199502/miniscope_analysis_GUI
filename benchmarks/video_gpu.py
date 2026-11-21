@@ -1,4 +1,4 @@
-"""Time full CPU and CUDA video steps on exactly the same synthetic recording."""
+"""Time full CPU and GPU video steps on exactly the same synthetic recording."""
 
 import argparse
 import json
@@ -12,7 +12,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from miniscope_gui.core.background import BG_FILE, BackgroundParams, run_background
-from miniscope_gui.core.gpu import detect_gpus
+from miniscope_gui.core.gpu import detect_gpus, open_backend
 from miniscope_gui.core.motion import (
     MC_FILE,
     SHIFTS_FILE,
@@ -23,10 +23,11 @@ from miniscope_gui.core.preprocess import MOVIE_FILE
 from miniscope_gui.core.workspace import Workspace
 
 
-def run(frames, size, repeats):
+def run(frames, size, repeats, backend="gpu"):
     inventory = detect_gpus()
-    if not inventory["cuda_devices"]:
-        raise RuntimeError(inventory["detail"])
+    device = open_backend(backend)
+    if not device.is_gpu:
+        raise RuntimeError(device.reason)
     rng = np.random.default_rng(51)
     base = cv2.GaussianBlur(
         rng.normal(60, 32, (size, size)).astype("float32"), (0, 0), 2
@@ -58,29 +59,32 @@ def run(frames, size, repeats):
             for attempt in range(repeats + 1):
                 order = ("cpu", "gpu") if attempt % 2 == 0 else ("gpu", "cpu")
                 for mode in order:
+                    selected = device.kind if mode == "gpu" else "cpu"
                     params = (
-                        MotionParams(backend=mode, template_frames=min(30, frames))
+                        MotionParams(backend=selected, template_frames=min(30, frames))
                         if step == "rigid"
-                        else BackgroundParams(backend=mode, source="preprocess")
+                        else BackgroundParams(backend=selected, source="preprocess")
                     )
                     start = perf_counter()
                     out = runner(None, workspaces[mode], params)
                     elapsed = perf_counter() - start
-                    if mode == "gpu" and out["compute_backend"] != "cuda":
+                    if mode == "gpu" and out["compute_backend"] != device.kind:
                         raise RuntimeError(out["fallback_reason"])
                     samples[mode].append(elapsed)
             name = MC_FILE if step == "rigid" else BG_FILE
-            cpu, cuda = [
+            cpu, accelerated = [
                 np.load(ws.path(name), mmap_mode="r") for ws in workspaces.values()
             ]
             max_diff = 0.0
             sum_diff = 0.0
-            for a, b in zip(cpu, cuda):
+            for a, b in zip(cpu, accelerated):
                 diff = abs(a.astype(np.float32) - b.astype(np.float32))
                 max_diff = max(max_diff, float(diff.max()))
                 sum_diff += diff.sum(dtype=np.float64)
-            del cpu, cuda, a, b
+            del cpu, accelerated, a, b
             result = {
+                "backend": device.kind,
+                "device": device.name,
                 "seconds": samples,
                 "speedup": float(
                     np.median(samples["cpu"][1:]) / np.median(samples["gpu"][1:])
@@ -97,6 +101,7 @@ def run(frames, size, repeats):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--backend", choices=("gpu", "metal", "cuda"), default="gpu")
     parser.add_argument("--frames", type=int, default=160)
     parser.add_argument("--size", type=int, default=256)
     parser.add_argument(
@@ -112,6 +117,8 @@ if __name__ == "__main__":
         )
     print(
         json.dumps(
-            run(args.frames, args.size, args.repeats), indent=2, ensure_ascii=False
+            run(args.frames, args.size, args.repeats, args.backend),
+            indent=2,
+            ensure_ascii=False,
         )
     )

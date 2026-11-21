@@ -20,6 +20,9 @@ dependencies = [
 
 [project.optional-dependencies]
 fast = ["numba>=0.60"]
+metal = [
+    "mlx==0.32.4; sys_platform == 'darwin' and platform_machine == 'arm64' and platform_release >= '23.0'",
+]
 cuda12 = [
     "cupy-cuda12x>=14,<15",
     "nvidia-cuda-runtime-cu12>=12.8",
