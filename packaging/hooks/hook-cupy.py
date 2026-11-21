@@ -10,6 +10,7 @@ def runtime_module(name):
 
 
 hiddenimports = [
+    "graphlib",  # imported by the compiled cupy._core._scalar extension
     *collect_submodules("cupy", filter=runtime_module),
     *collect_submodules("cupy_backends", filter=runtime_module),
     *collect_submodules("cuda.pathfinder", filter=runtime_module),

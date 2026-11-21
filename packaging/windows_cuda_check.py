@@ -8,7 +8,7 @@ import traceback
 
 def check(report, require_gpu):
     import cupy
-    from cuda.pathfinder import find_nvidia_header_directory, load_nvidia_dynamic_lib
+    from cuda.pathfinder import DynamicLibNotFoundError, find_nvidia_header_directory, load_nvidia_dynamic_lib
     from cupy_backends.cuda.libs import nvrtc
     from miniscope_gui.core.gpu import open_backend
     from windows_pipeline_probe import exercise_pipeline
@@ -41,13 +41,18 @@ def check(report, require_gpu):
         nvrtc.destroyProgram(program)
 
     try:
-        count = cupy.cuda.runtime.getDeviceCount()
-    except cupy.cuda.runtime.CUDARuntimeError as exc:
-        # cudaErrorInsufficientDriver or cudaErrorNoDevice on an ordinary CPU runner.
-        if exc.status not in {35, 100}:
-            raise
+        load_nvidia_dynamic_lib("cuda")  # nvcuda.dll is provided by the system driver.
+    except DynamicLibNotFoundError as exc:
         count = 0
         report["driver"] = str(exc)
+    else:
+        try:
+            count = cupy.cuda.runtime.getDeviceCount()
+        except cupy.cuda.runtime.CUDARuntimeError as exc:
+            if exc.status not in {35, 100}:  # insufficient driver or no device
+                raise
+            count = 0
+            report["driver"] = str(exc)
     report["visible_devices"] = count
     backend = open_backend("cuda" if count else "auto")
     report.update(backend=backend.kind, device=backend.name, detail=backend.reason)
