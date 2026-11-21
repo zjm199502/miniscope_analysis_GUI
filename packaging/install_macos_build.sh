@@ -6,8 +6,9 @@ stage=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/calcilume-wheels.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 python -m pip wheel --no-deps --wheel-dir "$stage/project" .
 app=("$stage"/project/miniscope_gui-*.whl)
+# Newer PySide wheels carry binaries with deployment targets above their wheel tag.
 python -m pip download --only-binary=:all: --platform macosx_14_0_arm64 \
-  --dest "$stage/runtime" "${app[0]}[metal]" pyinstaller
+  --dest "$stage/runtime" "${app[0]}[metal]" "PySide6==6.8.3" pyinstaller
 # Only the previously resolved wheels can enter the frozen runtime.
 python -m pip install --no-index --find-links "$stage/runtime" --force-reinstall \
   "${app[0]}[metal]" pyinstaller
