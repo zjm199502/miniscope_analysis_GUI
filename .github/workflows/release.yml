@@ -73,17 +73,21 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
-      - run: python -m pip install . pyinstaller
+      - run: python -m pip install ".[cuda12]" pyinstaller
       - run: Set-Content -LiteralPath base_version.txt -NoNewline -Encoding ascii -Value "${{ needs.test.outputs.version }}"
         shell: pwsh
       - name: Build
         run: >
           pyinstaller --noconfirm --clean --windowed --name MiniscopeAnalysis --icon packaging/calcilume.ico
           --add-data "base_version.txt:."
+          --hidden-import cupy --additional-hooks-dir packaging/hooks
           --collect-submodules miniscope_gui --collect-data miniscope_gui
           --collect-submodules pyqtgraph --collect-data pyqtgraph
           --exclude-module numba --exclude-module llvmlite --exclude-module matplotlib
           --exclude-module tkinter packaging/launcher.py
+      - name: Exercise packaged CUDA compiler and compute backend
+        shell: pwsh
+        run: ./packaging/test_windows_cuda.ps1
       - name: Build and exercise Windows installer
         shell: pwsh
         run: |
@@ -136,6 +140,7 @@ jobs:
             test -s "$lib"
             lipo "$lib" -verify_arch arm64
           done
+          QT_QPA_PLATFORM=offscreen dist/MiniscopeAnalysis.app/Contents/MacOS/MiniscopeAnalysis --check-macos-runtime
       - name: Sign, (optionally) notarize, zip and dmg
         # ad-hoc signature without secrets; Developer ID + notarization once they are added
         env:
@@ -157,6 +162,9 @@ jobs:
           retention-days: 30
 
   publish:
+    concurrency:
+      group: calcilume-update-channel
+      cancel-in-progress: false
     needs: [test, windows, macos]
     if: always() && needs.test.result == 'success' && (needs.test.outputs.full != 'true' || (needs.windows.result == 'success' && needs.macos.result == 'success'))
     runs-on: ubuntu-latest
@@ -177,28 +185,69 @@ jobs:
           awk -v t="## v$VERSION" '$0==t{f=1;next} /^## /{f=0} f' CHANGELOG.md > notes.md
           test -s notes.md || echo "MiniscopeAnalysis v$VERSION" > notes.md
           cat notes.md
-      - name: Update channel
+      - name: Check current update channel
         run: |
           gh release view updates >/dev/null 2>&1 || gh release create updates --prerelease \
             --title "自动更新通道" --notes "软件内自动更新使用的文件，请不要手动下载。新用户请从最新的正式版本安装。"
-          gh release download updates -p latest.json -O old.json 2>/dev/null || echo '{}' > old.json
-          upload="miniscope_gui-patch.zip"
-          if [ "$FULL" = "true" ]; then upload="$upload assets/MiniscopeAnalysis-Windows.zip assets/MiniscopeAnalysis-macOS-arm64.zip assets/CalciLume-Windows-Setup.exe"; fi
-          gh release upload updates $upload --clobber
+          assets=$(gh release view updates --json assets --jq '[.assets[] | select(.name=="latest.json")] | length')
+          if [ "$assets" -gt 0 ]; then
+            gh release download updates -p latest.json -O old.json
+          else
+            test "$FULL" = "true"
+            echo '{}' > old.json
+          fi
           python3 - <<'PY'
-          import json, os, subprocess
+          import json, os
+          def version(text):
+              return tuple(map(int, text.split(".")))
+          current = json.load(open("old.json")).get("version", "0.0.0")
+          if version(current) > version(os.environ["VERSION"]):
+              raise SystemExit(f"Update channel is already at {current}")
+          PY
+      - name: Publish the verified install files together
+        if: needs.test.outputs.major == 'true'
+        run: |
+          tag="v$VERSION"
+          if ! gh release view "$tag" --json id >/dev/null 2>&1; then
+            gh release create "$tag" --target "$GITHUB_SHA" --draft \
+              --title "CalciLume 钙荧 $tag" --notes-file notes.md
+          fi
+          if [ "$(gh release view "$tag" --json isDraft --jq .isDraft)" = "true" ]; then
+            gh release upload "$tag" assets/* miniscope_gui-patch.zip --clobber
+            gh release edit "$tag" --draft=false --latest
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > public-release.json
+      - name: Update channel
+        run: |
+          if [ "$MAJOR" != "true" ]; then
+            patch="miniscope_gui-patch-$VERSION.zip"
+            cp miniscope_gui-patch.zip "$patch"
+            upload=("$patch")
+            if [ "$FULL" = "true" ]; then upload+=(assets/MiniscopeAnalysis-Windows.zip assets/MiniscopeAnalysis-macOS-arm64.zip assets/CalciLume-Windows-Setup.exe); fi
+            gh release upload updates "${upload[@]}" --clobber
+          fi
+          python3 - <<'PY'
+          import json, os
           repo = os.environ["GITHUB_REPOSITORY"]; v = os.environ["VERSION"]
           base = f"https://github.com/{repo}/releases/download/updates/"
           old = json.load(open("old.json"))
-          size = lambda p: os.path.getsize(p)
+          major = os.environ["MAJOR"] == "true"
+          public = {a["name"]: a for a in json.load(open("public-release.json"))["assets"]} if major else {}
+          def asset(name, path):
+              if major:
+                  a = public[name]
+                  assert a["state"] == "uploaded" and a["size"] > 0, name
+                  return {"url": a["browser_download_url"], "size": a["size"]}
+              return {"url": base + name, "size": os.path.getsize(path)}
+          patch = "miniscope_gui-patch.zip" if major else f"miniscope_gui-patch-{v}.zip"
           m = {"version": v, "notes": open("notes.md", encoding="utf-8").read(),
                "min_base": os.environ["MIN_BASE"],
                "page": f"https://github.com/{repo}/releases/latest",
-               "patch": {"url": base + "miniscope_gui-patch.zip", "size": size("miniscope_gui-patch.zip")}}
+               "patch": asset(patch, "miniscope_gui-patch.zip")}
           if os.environ["FULL"] == "true":
-              m["windows_setup"] = {"url": base + "CalciLume-Windows-Setup.exe", "size": size("assets/CalciLume-Windows-Setup.exe")}
+              m["windows_setup"] = asset("CalciLume-Windows-Setup.exe", "assets/CalciLume-Windows-Setup.exe")
               m["full_version"] = v
-              m["full"] = {n: {"url": base + n, "size": size("assets/" + n)}
+              m["full"] = {n: asset(n, "assets/" + n)
                            for n in ("MiniscopeAnalysis-Windows.zip", "MiniscopeAnalysis-macOS-arm64.zip")}
           else:
               if old.get("windows_setup"): m["windows_setup"] = old["windows_setup"]
@@ -208,12 +257,6 @@ jobs:
           print(json.dumps(m, ensure_ascii=False, indent=1))
           PY
           gh release upload updates latest.json --clobber
-      - name: Public release (x.y.0 only)
-        if: needs.test.outputs.major == 'true'
-        run: |
-          gh release view "v$VERSION" >/dev/null 2>&1 || \
-            gh release create "v$VERSION" --target "$GITHUB_SHA" --title "CalciLume 钙荧 v$VERSION" --notes-file notes.md --latest
-          gh release upload "v$VERSION" assets/* --clobber
       - name: Also attach the full build to an existing Release
         if: needs.test.outputs.full == 'true' && inputs.attach_to_release != ''
         env: {TARGET: "${{ inputs.attach_to_release }}"}

@@ -1,9 +1,7 @@
 """Check for a newer version and install it from inside the app.
 
-Update channel: a single pre-release named "updates" on GitHub holds
-    latest.json                          what the newest version is and how to get it
-    miniscope_gui-patch.zip              small update: just the miniscope_gui package
-    MiniscopeAnalysis-*.zip              full builds, needed when libraries change
+The "updates" pre-release hosts latest.json. Its asset URLs point to the
+version's patch or to full installers when native libraries change.
 Only x.y.0 (the version after x.(y-1).10) is also published as a normal
 GitHub Release with installers.
 
@@ -118,6 +116,9 @@ def check_latest(timeout: float = 8.0) -> Release | None:
              "page": data.get("html_url") or RELEASES_PAGE,
              "full_version": str(data.get("tag_name", "")).lstrip("vV"),
              "full": {want: {"url": full[want][0], "size": full[want][1]}} if want in full else {}}
+        setup = full.get("CalciLume-Windows-Setup.exe")
+        if setup:
+            m["windows_setup"] = {"url": setup[0], "size": setup[1]}
     ver = str(m.get("version", "")).lstrip("vV")
     if not ver or not is_newer(ver):
         return None

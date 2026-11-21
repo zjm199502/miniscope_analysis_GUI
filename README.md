@@ -27,6 +27,8 @@
 
 Windows 用户请[下载安装程序](https://github.com/zjm199502/miniscope_analysis_GUI/releases/latest/download/CalciLume-Windows-Setup.exe)，双击后按向导安装，然后从开始菜单打开 CalciLume。卸载入口位于 Windows「已安装的应用」。实验数据和分析项目请保存在单独的项目目录。
 
+Apple M 系列 Mac 用户可[下载 macOS 安装镜像](https://github.com/zjm199502/miniscope_analysis_GUI/releases/latest/download/MiniscopeAnalysis-macOS-arm64.dmg)，打开后将应用拖入“应用程序”。Metal 加速需要 macOS 14 或更新版本。
+
 ### 从源码运行
 
 需要 Python 3.10 或更新版本。
@@ -42,7 +44,7 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-本地开发版的运动校正、去背景及细胞提取支持 Apple Metal 和 NVIDIA CUDA。Apple M 系列 Mac 可从源码目录运行 `bash packaging/test_macos_metal.sh` 做真机对照测试。[安装与设备选择说明](docs/教程.md#视频处理与细胞提取的-gpu-计算设备)
+运动校正、去背景及细胞提取支持 Apple Metal 和 NVIDIA CUDA。Apple M 系列 Mac 可从源码目录运行 `bash packaging/test_macos_metal.sh` 做真机对照测试。[安装与设备选择说明](docs/教程.md#视频处理与细胞提取的-gpu-计算设备)
 
 Windows 上也可以直接双击 `packaging\install_and_run.bat`（第一次会自动安装）。
 打包成独立的 exe：在仓库根目录运行 `packaging\build_windows.bat`。

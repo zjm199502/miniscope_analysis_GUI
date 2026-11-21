@@ -154,3 +154,19 @@ def test_full_setup_update(monkeypatch, tmp_path):
         assert result.suffix == ".exe" and result.read_bytes() == b"test"
     finally:
         result.unlink()
+
+
+def test_public_release_fallback_uses_windows_installer(monkeypatch):
+    from miniscope_gui import patching
+    def fetch(url, timeout):
+        if url == updater.CHANNEL_MANIFEST:
+            raise OSError("channel unavailable")
+        return {"tag_name": "v99.0.0", "assets": [
+            {"name": "MiniscopeAnalysis-Windows.zip", "browser_download_url": "https://x/app.zip", "size": 8},
+            {"name": "CalciLume-Windows-Setup.exe", "browser_download_url": "https://x/setup.exe", "size": 4},
+        ]}
+    monkeypatch.setattr(updater, "_get_json", fetch)
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(patching, "base_version", lambda: "0.4.0")
+    result = updater.check_latest()
+    assert (result.kind, result.asset_url, result.asset_size) == ("setup", "https://x/setup.exe", 4)

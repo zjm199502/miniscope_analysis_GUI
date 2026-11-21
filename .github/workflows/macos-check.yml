@@ -44,6 +44,7 @@ jobs:
             test -s "$lib"
             lipo "$lib" -verify_arch arm64
           done
+          QT_QPA_PLATFORM=offscreen dist/MiniscopeAnalysis.app/Contents/MacOS/MiniscopeAnalysis --check-macos-runtime
       - name: Sign, (optionally) notarize, zip and dmg
         env:
           MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
