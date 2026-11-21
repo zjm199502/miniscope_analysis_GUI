@@ -9,10 +9,11 @@ from ...core.extraction import ExtractionParams, run_extraction
 from ...core.motion import MotionParams, run_motion_correction
 from ...core.signals import INDICATORS, SignalParams, run_signals
 from .base import StepPage
+from .compute_page import ComputePage
 from .common import heading, hint
 
 
-class MotionPage(StepPage):
+class MotionPage(ComputePage):
     step_key = "motion"
     title = "3. 运动校正"
     intro = ("动物活动时，脑组织会相对镜头轻微移动。这一步以血管等结构为参照，"
@@ -23,6 +24,7 @@ class MotionPage(StepPage):
     results_hint = "对比视频里，校正后的画面应该基本不再抖动；位移曲线显示每一帧移动了多少像素。"
 
     def build_params(self):
+        super().build_params()
         self.max_shift = self.add_param("最大位移", self.spin(2, 100, 20, suffix=" 像素"),
                                         "允许的最大移动距离（预处理后的像素）。一般不用改。")
         self.piecewise = self.check("分块非刚性校正（较慢）")
@@ -33,7 +35,8 @@ class MotionPage(StepPage):
 
     def params(self):
         return MotionParams(max_shift=self.max_shift.value(), piecewise=self.piecewise.isChecked(),
-                            patch_size=self.patch.value(), patch_overlap=self.patch.value() // 3)
+                            patch_size=self.patch.value(), patch_overlap=self.patch.value() // 3,
+                            **self.compute_params())
 
     def run_function(self):
         return run_motion_correction
@@ -44,7 +47,7 @@ class MotionPage(StepPage):
             f"与模板的相似度 {result['corr_before']:.2f} → {result['corr_after']:.2f}")
 
 
-class BackgroundPage(StepPage):
+class BackgroundPage(ComputePage):
     step_key = "background"
     title = "4. 去除背景"
     intro = ("单光子成像里，焦平面外的荧光形成大片模糊的背景。这一步先轻微去噪，"
@@ -54,6 +57,7 @@ class BackgroundPage(StepPage):
     results_hint = "最大投影上应该能看到很多清晰、分开的亮点，每个亮点就是一个细胞。"
 
     def build_params(self):
+        super().build_params()
         self.diam = self.add_param("细胞直径", self.spin(3, 60, 8, suffix=" 像素"),
                                    "预处理后画面里一个细胞大约多宽。点下面的「自动估计」，"
                                    "软件会在运动校正后的最大投影上测量亮点的大小。"
@@ -85,7 +89,7 @@ class BackgroundPage(StepPage):
     def params(self):
         m = self.median.currentText()
         return BackgroundParams(cell_diameter=self.diam.value(),
-                                median_ksize=1 if m == "关闭" else int(m))
+                                median_ksize=1 if m == "关闭" else int(m), **self.compute_params())
 
     def run_function(self):
         return run_background

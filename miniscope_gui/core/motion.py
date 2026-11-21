@@ -39,6 +39,8 @@ class MotionParams:
     patch_size: int = 96
     patch_overlap: int = 32
     max_deviation: int = 5         # how far a patch may deviate from the rigid shift
+    backend: str = "auto"
+    device_id: int | None = None
 
 
 def bandpass(frame: np.ndarray, sigma_small: float, sigma_large: float) -> np.ndarray:
@@ -66,6 +68,13 @@ class _Registrar:
     def _fft(self, img, win):
         return np.fft.rfft2(img * win)
 
+    @staticmethod
+    def batch_size(shape):
+        return 1
+
+    def shifts(self, template, images):
+        return [self.shift(template, image) for image in images]
+
     def shift(self, template: np.ndarray, img: np.ndarray, window=None) -> tuple[float, float, float]:
         """Return (dx, dy, response): the shift that moves img onto template."""
         win = self.window if window is None else window
@@ -83,21 +92,7 @@ class _Registrar:
         idx_y = np.arange(-m, m + 1) % h
         idx_x = np.arange(-m, m + 1) % w
         sub = r[np.ix_(idx_y, idx_x)]
-        iy, ix = np.unravel_index(np.argmax(sub), sub.shape)
-        peak = float(sub[iy, ix])
-        dy, dx = float(iy - m), float(ix - m)
-        # sub-pixel refinement: parabola through the peak and its neighbours
-        if 0 < iy < 2 * m:
-            a_, b_, c_ = sub[iy - 1, ix], sub[iy, ix], sub[iy + 1, ix]
-            d = a_ - 2 * b_ + c_
-            if d < 0:
-                dy += 0.5 * (a_ - c_) / d
-        if 0 < ix < 2 * m:
-            a_, b_, c_ = sub[iy, ix - 1], sub[iy, ix], sub[iy, ix + 1]
-            d = a_ - 2 * b_ + c_
-            if d < 0:
-                dx += 0.5 * (a_ - c_) / d
-        return dx, dy, peak
+        return _peak_shift(sub, m)
 
     def shift_limited(self, template, img, window, max_shift):
         old = self.p.max_shift
@@ -106,6 +101,87 @@ class _Registrar:
             return self.shift(template, img, window)
         finally:
             self.p.max_shift = old
+
+    def patch_shifts(self, template, image, origins, size, window, limit):
+        return [self.shift_limited(template[y:y+size, x:x+size], image[y:y+size, x:x+size],
+                                   window, limit) for y, x in origins]
+
+
+def _peak_shift(sub, m):
+    iy, ix = np.unravel_index(np.argmax(sub), sub.shape)
+    peak = float(sub[iy, ix])
+    dy, dx = float(iy - m), float(ix - m)
+    # Sub-pixel refinement: apply identical arithmetic to both backends.
+    if 0 < iy < 2 * m:
+        a, b, c = sub[iy - 1, ix], sub[iy, ix], sub[iy + 1, ix]
+        d = a - 2 * b + c
+        if d < 0:
+            dy += 0.5 * (a - c) / d
+    if 0 < ix < 2 * m:
+        a, b, c = sub[iy, ix - 1], sub[iy, ix], sub[iy, ix + 1]
+        d = a - 2 * b + c
+        if d < 0:
+            dx += 0.5 * (a - c) / d
+    return dx, dy, peak
+
+
+class _CudaRegistrar(_Registrar):
+    """Compute batched spectra on the GPU; transfer only the small peak windows."""
+
+    def __init__(self, shape, p, backend):
+        super().__init__(shape, p)
+        self.backend = backend
+        self.xp = backend.xp
+        self.device_window = self.xp.asarray(self.window)
+        self.patch_windows = {}
+
+    @staticmethod
+    def batch_size(shape):
+        # Powers of two avoid creating a different cuFFT plan for short I/O blocks.
+        capacity = max(1, min(32, (64 * 1024**2) // (int(np.prod(shape)) * 72)))
+        return 1 << (capacity.bit_length() - 1)
+
+    def _spectrum(self, images, window):
+        xp = self.xp
+        # Phase-only correlation gives weak spatial frequencies the same weight
+        # as strong ones. Single-precision cuFFT loses phase on smooth images.
+        weighted = (xp.asarray(images) * window).astype(xp.float64)
+        batch = self.batch_size(images.shape[-2:])
+        if len(images) < batch:
+            padded = xp.zeros((batch, *images.shape[-2:]), dtype=weighted.dtype)
+            padded[:len(images)] = weighted
+            weighted = padded
+        return xp.fft.rfft2(weighted, axes=(-2, -1)).astype(xp.complex64)
+
+    def _correlate(self, spectra, images, window, limit):
+        xp = self.xp
+        h, w = images.shape[-2:]
+        cross = spectra * xp.conj(self._spectrum(images, window))
+        cross /= xp.abs(cross) + 1e-9
+        corr = xp.fft.irfft2(cross, s=(h, w), axes=(-2, -1))
+        m = min(limit, h // 2 - 1, w // 2 - 1)
+        indices = xp.arange(-m, m + 1)
+        peaks = self.backend.asnumpy(corr[:len(images), (indices % h)[:, None], indices % w])
+        return [_peak_shift(sub, m) for sub in peaks]
+
+    def shifts(self, template, images):
+        if self._template is not template:
+            self._template = template
+            self._tpl_fft = self.xp.asarray(self._fft(template, self.window))
+        return self._correlate(self._tpl_fft, images, self.device_window, self.p.max_shift)
+
+    def patch_shifts(self, template, image, origins, size, window, limit):
+        if size not in self.patch_windows:
+            self.patch_windows[size] = self.xp.asarray(window)
+        win = self.patch_windows[size]
+        shifts = []
+        batch = self.batch_size((size, size))
+        for start in range(0, len(origins), batch):
+            chunk = origins[start:start+batch]
+            refs = np.stack([template[y:y+size, x:x+size] for y, x in chunk])
+            imgs = np.stack([image[y:y+size, x:x+size] for y, x in chunk])
+            shifts.extend(self._correlate(self._spectrum(refs, win), imgs, win, limit))
+        return shifts
 
 
 def apply_shift(frame: np.ndarray, dx: float, dy: float) -> np.ndarray:
@@ -131,15 +207,13 @@ def _piecewise_field(reg: _Registrar, template_f, img_f, dx0, dy0, p: MotionPara
     size = min(p.patch_size, h, w)
     ys, xs = _patch_grid(h, w, size, p.patch_overlap)
     pre = apply_shift(img_f, dx0, dy0)
-    gx = np.zeros((len(ys), len(xs)), np.float32)
-    gy = np.zeros_like(gx)
-    win = windows.setdefault(size, cv2.createHanningWindow((size, size), cv2.CV_32F))
-    for i, y in enumerate(ys):
-        for j, x in enumerate(xs):
-            t = template_f[y:y + size, x:x + size]
-            s = pre[y:y + size, x:x + size]
-            ddx, ddy, _ = reg.shift_limited(t, s, win, p.max_deviation)
-            gx[i, j], gy[i, j] = ddx, ddy
+    if size not in windows:
+        windows[size] = cv2.createHanningWindow((size, size), cv2.CV_32F)
+    win = windows[size]
+    origins = [(y, x) for y in ys for x in xs]
+    local = reg.patch_shifts(template_f, pre, origins, size, win, p.max_deviation)
+    vectors = np.asarray(local, dtype=np.float32).reshape(len(ys), len(xs), 3)
+    gx, gy = vectors[:, :, 0], vectors[:, :, 1]
     if gx.size > 1:  # damp outlier patches
         gx = cv2.medianBlur(gx, 3) if min(gx.shape) >= 3 else gx
         gy = cv2.medianBlur(gy, 3) if min(gy.shape) >= 3 else gy
@@ -173,11 +247,13 @@ def build_template(movie, p: MotionParams, reg: _Registrar, should_stop=None) ->
     aligned = frames.copy()
     template = np.median(aligned, axis=0, overwrite_input=True)
     for _ in range(max(1, p.iterations)):
-        for j, f in enumerate(frames):
+        batch = reg.batch_size(template.shape)
+        for start in range(0, len(frames), batch):
             if should_stop and should_stop():
                 raise InterruptedError("已取消")
-            dx, dy, _ = reg.shift(template, f)
-            aligned[j] = apply_shift(f, dx, dy)
+            group = frames[start:start+batch]
+            for j, (dx, dy, _) in enumerate(reg.shifts(template, group)):
+                aligned[start + j] = apply_shift(group[j], dx, dy)
         template = np.median(aligned, axis=0, overwrite_input=True)
     return template
 
@@ -188,11 +264,51 @@ def run_motion_correction(session, ws: Workspace, p: MotionParams,
     progress = progress or (lambda f, m: None)
     should_stop = should_stop or (lambda: False)
     from .cleanup import require_file
+    from .gpu import open_backend, is_gpu_error
+
     require_file(ws, "movie_pre.npy", "2. 预处理")
     movie = load_movie(ws)
+    backend = open_backend(p.backend, p.device_id)
+    reason = backend.reason if not backend.is_gpu and p.backend != "cpu" else ""
+    try:
+        with backend.activate():
+            return _correct_movie(ws, movie, p, backend, reason, progress, should_stop)
+    except Exception as exc:
+        if backend.is_gpu:
+            # A traceback can hold the registrar, FFT buffers and pending frame
+            # batches after cancellation, even after the worker has stopped.
+            from traceback import clear_frames
+            clear_frames(exc.__traceback__)
+        if not backend.is_gpu or not is_gpu_error(exc):
+            raise
+        reason = f"GPU 运行失败：{exc}"
+    finally:
+        backend.release()
+    if should_stop():
+        raise InterruptedError("已取消")
+    progress(0.0, reason + "。从头使用 CPU 重新校正…")
+    return _correct_movie(ws, movie, p, open_backend("cpu"), reason, progress, should_stop)
+
+
+def _registered_frames(movie, p, reg, template, should_stop):
     T, H, W = movie.shape
-    reg = _Registrar((H, W), p)
-    progress(0.0, "生成参考模板…")
+    batch = reg.batch_size((H, W))
+    for block_start in range(0, T, 100):
+        block = movie[block_start:block_start + 100]
+        for start in range(0, len(block), batch):
+            if should_stop():
+                raise InterruptedError("已取消")
+            raw_frames = block[start:start + batch]
+            filtered = np.stack([bandpass(raw, p.filter_sigma, p.bg_sigma) for raw in raw_frames])
+            shifts = reg.shifts(template, filtered)
+            for offset, (dx, dy, _) in enumerate(shifts):
+                yield block_start + start + offset, raw_frames[offset], filtered[offset], dx, dy
+
+
+def _correct_movie(ws, movie, p, backend, reason, progress, should_stop):
+    T, H, W = movie.shape
+    reg = _CudaRegistrar((H, W), p, backend) if backend.is_gpu else _Registrar((H, W), p)
+    progress(0.0, f"生成参考模板（{backend.name}）…")
     template = build_template(movie, p, reg, should_stop)
 
     shifts = np.zeros((T, 2), np.float32)
@@ -203,16 +319,9 @@ def run_motion_correction(session, ws: Workspace, p: MotionParams,
     max_img = np.zeros((H, W), np.float32)
     with ws.stage_outputs() as staged:
         with MovieWriter(staged.path(MC_FILE), (T, H, W), MOVIE_DTYPE) as out:
-            blk, blk_start = None, -1
-            for t in range(T):
+            for t, raw, f, dx, dy in _registered_frames(movie, p, reg, template, should_stop):
                 if should_stop():
                     raise InterruptedError("已取消")
-                if blk is None or t >= blk_start + len(blk):
-                    blk_start = t
-                    blk = movie[t:t + 100]
-                raw = np.asarray(blk[t - blk_start], dtype=np.float32)
-                f = bandpass(raw, p.filter_sigma, p.bg_sigma)
-                dx, dy, _ = reg.shift(template, f)
                 if p.piecewise:
                     fx, fy = _piecewise_field(reg, template, f, dx, dy, p, windows)
                     corrected = apply_field(raw.astype(np.float32), fx, fy)
@@ -231,6 +340,10 @@ def run_motion_correction(session, ws: Workspace, p: MotionParams,
                 if t % 100 == 0 or t == T - 1:
                     progress((t + 1) / T, f"运动校正 {t + 1}/{T} 帧")
 
+        if backend.is_gpu:
+            backend.synchronize()
+        if should_stop():
+            raise InterruptedError("已取消")
         sub = np.arange(0, T, 10)
         np.save(staged.path(SHIFTS_FILE), shifts)
         np.save(staged.path(TEMPLATE_FILE), template)
@@ -238,6 +351,9 @@ def run_motion_correction(session, ws: Workspace, p: MotionParams,
         np.save(staged.path("mc_mean.npy"), (sum_img / T).astype(np.float32))
         np.save(staged.path("mc_max.npy"), max_img)
         summary = {
+            "compute_backend": "cuda" if backend.is_gpu else "cpu",
+            "compute_device": backend.name,
+            "fallback_reason": reason,
             "max_abs_shift": float(np.abs(shifts).max()),
             "mean_abs_shift": float(np.abs(shifts).mean()),
             "corr_before": float(q_before[sub].mean()),

@@ -15,6 +15,7 @@ from ..core.preprocess import MAX_FILE, MEAN_FILE, load_movie
 from .cell_review import CellReview
 from .pages.calcium_pages import BackgroundPage, ExtractionPage, MotionPage, SignalsPage
 from .pages.common import FitScrollArea
+from .pages.compute_page import DeviceReport, probe_devices
 from .pages.import_page import ImportPage
 from .pages.behavior_pages import BehaviorPage, SyncPage
 from .pages.modeling_page import ModelingPage
@@ -42,6 +43,7 @@ class MainWindow(QMainWindow):
         self.thread = None
         self.worker = None
         self.running_page = None
+        self._probe_thread = self._probe_worker = None
         self._closing = False
         self._pending_session = None
 
@@ -191,6 +193,8 @@ class MainWindow(QMainWindow):
         page = self.pages.widget(row)
         self._joint = None
         self._clear_model_view()
+        if page in (self.motion_page, self.bg_page) and self.ws:
+            self._identify_devices(page)
         if page is self.model_page:
             self.model_page.on_context()
             self.model_page.update_status()
@@ -205,6 +209,37 @@ class MainWindow(QMainWindow):
             self.show_result("cells")
 
     # -------------------------------------------------------------- tasks
+    def _identify_devices(self, page):
+        # Device discovery belongs to the window, not to a project or its analysis queue.
+        if page.has_inventory() or self._probe_thread is not None or self._closing:
+            return
+        for target in (self.motion_page, self.bg_page):
+            target.device_info.setText("正在识别系统显卡并检查 CUDA…")
+            target.device_info.show()
+        self._probe_thread, self._probe_worker = start_worker(
+            self, probe_devices, None, None, {"refresh": False})
+        self._probe_worker.finished.connect(self._show_device_report)
+        self._probe_worker.failed.connect(self._probe_failed)
+        self._probe_thread.finished.connect(self._finish_probe)
+        self._probe_thread.start()
+
+    def _show_device_report(self, result):
+        if not self._closing and result.inventory:
+            self.motion_page.show_devices(result.inventory)
+            self.bg_page.show_devices(result.inventory)
+
+    def _probe_failed(self, msg):
+        if not self._closing:
+            for page in (self.motion_page, self.bg_page):
+                page.device_info.setText(f"设备识别失败：{msg}")
+
+    def _finish_probe(self):
+        self._probe_thread.wait()
+        self._probe_thread.deleteLater()
+        self._probe_thread = self._probe_worker = None
+        if self._closing and self.thread is None:
+            self.close()
+
     def _run_step(self, page, fn, params):
         if self.thread is not None:
             return
@@ -231,6 +266,13 @@ class MainWindow(QMainWindow):
 
     def _on_done(self, result):
         if self._closing or self._pending_session:
+            return
+        if isinstance(result, DeviceReport):
+            if result.inventory:
+                self._show_device_report(result)
+                self.statusBar().showMessage("显卡检测完成")
+            else:
+                self.statusBar().showMessage("已取消显卡检测")
             return
         page = self.running_page
         self._refresh_steps()
@@ -675,6 +717,9 @@ class MainWindow(QMainWindow):
         self._pending_session = None
         if self.thread is not None:
             self._stop_for_transition()
+            e.ignore()
+            return
+        if self._probe_thread is not None:
             e.ignore()
             return
         self.updates.shutdown()

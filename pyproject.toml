@@ -20,6 +20,12 @@ dependencies = [
 
 [project.optional-dependencies]
 fast = ["numba>=0.60"]
+cuda12 = [
+    "cupy-cuda12x>=14,<15",
+    "nvidia-cuda-runtime-cu12>=12.8",
+    "nvidia-cuda-nvrtc-cu12>=12.8",
+    "nvidia-cufft-cu12>=11.3",
+]
 
 dev = ["pytest>=7"]
 
